@@ -9,6 +9,7 @@
 #include <ADS7828.h>
 #include "FS.h"
 #include <LittleFS.h>
+#include <static_files.h>
 #define FORMAT_LITTLEFS_IF_FAILED true
 
 // Important to be defined BEFORE including ETH.h for ETH.begin() to work.
@@ -216,6 +217,7 @@ void i2c_scan() {
 String db_path = "/card_database";
 
 void initialize_card_database() {
+  Serial.println("Initializing Database");
   // If the database file is not present, create it
   if (!LittleFS.exists(db_path)) {
     Serial.println("Database Missing, Creating an empty one");
@@ -263,32 +265,27 @@ void remove_card_from_database(String card) {
   file.close();
 }
 
-bool auth_enabled=false;
+bool auth_enabled=True;
 
-void webserver_handle_root() {
+void check_authentication(){
   if (auth_enabled) {
     if (!server.authenticate(www_username, www_password)) {
       return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
     }
   }
-  server.send(200, "text/html", "<h1>Sup?</h1>");
 }
 
+
+
 void webserver_handle_card_options() {
-  if (auth_enabled) {
-    if (!server.authenticate(www_username, www_password)) {
-      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
-    }
-  }
+  check_authentication();
+
   server.send(200, "text/plain", "");
 }
 
 void webserver_handle_card_put() {
-  if (auth_enabled) {
-    if (!server.authenticate(www_username, www_password)) {
-      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
-    }
-  }
+  check_authentication();
+
   String card = server.pathArg(0);
   Serial.println("ADD " + card);
   add_card_to_database(card);
@@ -296,11 +293,8 @@ void webserver_handle_card_put() {
 }
 
 void webserver_handle_card_delete() {
-  if (auth_enabled) {
-    if (!server.authenticate(www_username, www_password)) {
-      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
-    }
-  }
+  check_authentication();
+
   String card = server.pathArg(0);
   Serial.println("REMOVE " + card);
   remove_card_from_database(card);
@@ -314,6 +308,71 @@ void webserver_get_card_list() {
   File file = LittleFS.open(db_path, FILE_READ);
   server.streamFile(file, "text/plain");
   file.close();
+}
+
+void webserver_strike_list(){
+  server.send(200, "text/plain", "0\n1\n");
+}
+
+void webserver_strike_status(){
+  server.send(200, "text/plain", "True");
+}
+
+void webserver_strike_current(){
+  server.send(200, "text/plain", "300mA");
+}
+
+void webserver_strike_connected(){
+  server.send(200, "text/plain", "true");
+}
+
+void webserver_strike_actuate(){
+  server.send(200, "text/plain", "");
+}
+
+void webserver_cardreader_current(){
+  server.send(200, "text/plain", "250");
+}
+
+void webserver_cardreader_fuse(){
+  server.send(200, "text/plain", "true");
+}
+
+void webserver_access_log(){
+  server.send(200, "text/plain", "1231231\n1231231\n12312321\n123123\n12313\n");
+}
+
+void webserver_handle_root() {
+  check_authentication();
+  File file = LittleFS.open("/index.html", FILE_READ);
+  server.streamFile(file, "text/html");
+  file.close();
+}
+void webserver_access_log_page(){
+  File file = LittleFS.open("/access_log.html", FILE_READ);
+  server.streamFile(file, "text/html");
+  file.close();
+}
+void webserver_diagnostics_page(){
+  File file = LittleFS.open("/diagnostics.html", FILE_READ);
+  server.streamFile(file, "text/html");
+  file.close();
+}
+
+void copy_static_files_to_filesystem(){
+  Serial.println("Initializing Web Files");
+  File file = LittleFS.open("/index.html", FILE_WRITE);
+  file.write(index_html,index_html_len);
+  file.close();
+
+  file = LittleFS.open("/access_log.html", FILE_WRITE);
+  file.write(access_log_html,access_log_html_len);
+  file.close();
+
+  file = LittleFS.open("/diagnostics.html", FILE_WRITE);
+  file.write(diagnostics_html,diagnostics_html_len);
+  file.close();
+
 }
 
 void setup() {
@@ -361,16 +420,37 @@ void setup() {
     Serial.println("LittleFS Mounted!");
   }
   initialize_card_database();
+  copy_static_files_to_filesystem();
 
   Network.onEvent(onEvent);
   ETH.begin();
 
   // Configure Web Server
   server.on("/", webserver_handle_root);
+  server.on("/index.html",webserver_handle_root);
+  server.on("/access_log.html",webserver_access_log_page);
+  server.on("/diagnostics.html",webserver_diagnostics_page);
+
+
   server.on(UriBraces("/card/{}"), HTTP_PUT, webserver_handle_card_put);
   server.on(UriBraces("/card/{}"), HTTP_DELETE, webserver_handle_card_delete);
   server.on(UriBraces("/card/{}"), HTTP_OPTIONS, webserver_handle_card_options);
   server.on("/cards", HTTP_GET, webserver_get_card_list);
+
+  server.on(UriBraces("/diagnostics/strike/{}/status"),HTTP_GET,webserver_strike_status);
+  server.on(UriBraces("/diagnostics/strike/{}/current"),HTTP_GET,webserver_strike_current);
+  server.on(UriBraces("/diagnostics/strike/{}/connected"),HTTP_GET,webserver_strike_connected);
+  server.on(UriBraces("/diagnostics/strike/{}/actuate"),HTTP_GET,webserver_strike_actuate);
+  server.on("/diagnostics/strikes",HTTP_GET,webserver_strike_list);
+
+  server.on("/diagnostics/cardreader/current",HTTP_GET,webserver_cardreader_current);
+
+  server.on("/diagnostics/cardreader/fuse",HTTP_GET,webserver_cardreader_fuse);
+  server.on("/access",HTTP_GET,webserver_access_log);
+
+
+
+
 
   // Start the web server
   server.begin();
