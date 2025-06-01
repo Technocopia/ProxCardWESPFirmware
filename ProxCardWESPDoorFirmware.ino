@@ -61,6 +61,9 @@ ADS7828 adc;
 #define vdiv_scale_f 5.7
 #define adc_to_v 0.00061035156
 
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -18000;
+const int   daylightOffset_sec = 3600;
 
 
 WebServer server(80);
@@ -80,6 +83,8 @@ void onEvent(arduino_event_id_t event) {
       Serial.println("ETH Got IP");
       Serial.println(ETH);
       eth_connected = true;
+        //init and get the time
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
       break;
     case ARDUINO_EVENT_ETH_LOST_IP:
       Serial.println("ETH Lost IP");
@@ -205,35 +210,6 @@ long int getIDOfCurrentCard() {
   return card;
 }
 
-void i2c_scan() {
-  byte error, address;
-  int nDevices;
-  Serial.println();
-  Serial.println("Scanning...");
-  nDevices = 0;
-  for (address = 1; address < 127; address++) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-    if (error == 0) {
-      Serial.print("I2C device found at address 0x");
-      if (address < 16)
-        Serial.print("0");
-      Serial.print(address, HEX);
-      Serial.println("  !");
-      nDevices++;
-    } else if (error == 4) {
-      Serial.print("Unknown error at address 0x");
-      if (address < 16)
-        Serial.print("0");
-      Serial.println(address, HEX);
-    }
-  }
-  if (nDevices == 0)
-    Serial.println("No I2C devices found\n");
-  else
-    Serial.println("done\n");
-  delay(5000);  // wait 5 seconds for next scan
-}
 
 String db_path = "/card_database";
 
@@ -262,6 +238,7 @@ bool card_in_database(unsigned long card) {
 }
 
 void add_card_to_database(String card) {
+  add_message_to_log("Adding card " + card + " to database");
   File file = LittleFS.open(db_path, FILE_APPEND);
   String san_card = String(card.toInt());
   file.println(san_card);
@@ -269,6 +246,7 @@ void add_card_to_database(String card) {
 }
 
 void remove_card_from_database(String card) {
+  add_message_to_log("Removing card " + card + " from database");
   String cards_file = "";
   File file = LittleFS.open(db_path, FILE_READ);
   while (file.available()) {
@@ -284,6 +262,85 @@ void remove_card_from_database(String card) {
   file = LittleFS.open(db_path, FILE_WRITE);
   file.print(cards_file);
   file.close();
+}
+
+void initialize_access_log(){
+  Serial.println("Initializing Database");
+  // If the database file is not present, create it
+  if (!LittleFS.exists("/access_log")) {
+    Serial.println("Access Log Missing, Creating an empty one");
+    File file = LittleFS.open("/access_log", FILE_WRITE);
+    file.print("");
+    file.close();
+  }
+
+}
+
+void add_card_to_log(unsigned long card, bool valid_card){
+  File file = LittleFS.open("/access_log", FILE_APPEND);
+  
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+  } else {
+    file.print(&timeinfo, "[ %B %d %Y %H:%M:%S ]    ");
+  }
+  file.print("Access ");
+  file.print(valid_card?"GRANTED":"DENIED");
+  file.println(" for " + String(card) );
+  file.close();
+}
+
+void add_message_to_log(String message){
+  File file = LittleFS.open("/access_log", FILE_APPEND);
+  
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+  } else {
+    file.print(&timeinfo, "[ %B %d %Y %H:%M:%S ]    ");
+  }
+  file.println(message);
+  file.close();  
+}
+
+void prune_access_log(){
+  long max_lines = 10000;
+  File in_file = LittleFS.open("/access_log", FILE_READ);
+
+  // count lines
+  long lines=0;
+  while (in_file.available()) {
+    String card_line = in_file.readStringUntil('\n');
+    lines++;
+  }
+
+  long start_point = lines - max_lines;
+  if (start_point<1) start_point=1;
+  else {
+    Serial.println("Access Log will be pruned");
+  }
+
+  
+  in_file.close();
+
+  in_file = LittleFS.open("/access_log", FILE_READ);
+  File out_file = LittleFS.open("/access_log_prune", FILE_WRITE);
+  lines=0;
+  while (in_file.available()) {
+    String card_line = in_file.readStringUntil('\n');
+    lines++;
+    if (lines<start_point) continue;
+    card_line.trim();
+    out_file.println(card_line);
+  }
+
+  out_file.close();
+  in_file.close();
+  LittleFS.remove("/access_log");
+  LittleFS.rename("/access_log_prune","/access_log");
+
+
 }
 
 bool auth_enabled = true;
@@ -323,19 +380,19 @@ void webserver_handle_card_delete() {
 }
 
 void webserver_get_card_list() {
-  //if (!server.authenticate(www_username, www_password)){
-  //  return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
-  //}
+  check_authentication();
   File file = LittleFS.open(db_path, FILE_READ);
   server.streamFile(file, "text/plain");
   file.close();
 }
 
 void webserver_strike_list() {
+  check_authentication();
   server.send(200, "text/plain", "0\n1\n");
 }
 
 void webserver_strike_status() {
+  check_authentication();
   unsigned int strike = server.pathArg(0).toInt();
   int adc_chan = -1;
   switch (strike) {
@@ -359,6 +416,7 @@ void webserver_strike_status() {
 }
 
 void webserver_strike_current() {
+  check_authentication();
   unsigned int strike = server.pathArg(0).toInt();
   int adc_chan = -1;
   switch (strike) {
@@ -374,6 +432,7 @@ void webserver_strike_current() {
 }
 
 void webserver_strike_connected() {
+  check_authentication();
   unsigned int strike = server.pathArg(0).toInt();
   int adc_chan = -1;
   switch (strike) {
@@ -397,6 +456,7 @@ void webserver_strike_connected() {
 }
 
 void webserver_strike_actuate() {
+  check_authentication();
   unsigned int strike = server.pathArg(0).toInt();
   if (set_strike(strike, false)) {
     server.send(200, "text/plain", "OK");
@@ -408,11 +468,13 @@ void webserver_strike_actuate() {
 }
 
 void webserver_cardreader_current() {
+  check_authentication();
   float reader_a = (adc.read(ADC_READER_CURRENT) * adc_to_v * vdiv_scale_f) / 0.1;
   server.send(200, "text/plain", String(reader_a));
 }
 
 void webserver_cardreader_fuse() {
+  check_authentication();
   float fuse_v = (adc.read(ADC_READER_FUSE_FB) * adc_to_v * vdiv_scale_f);
   if (fuse_v > 11.0) {
     server.send(200, "text/plain", "true");
@@ -423,7 +485,10 @@ void webserver_cardreader_fuse() {
 }
 
 void webserver_access_log() {
-  server.send(200, "text/plain", "1231231\n1231231\n12312321\n123123\n12313\n");
+  check_authentication();
+  File file = LittleFS.open("/access_log", FILE_READ);
+  server.streamFile(file, "text/plain");
+  file.close();
 }
 
 void webserver_handle_root() {
@@ -433,11 +498,13 @@ void webserver_handle_root() {
   file.close();
 }
 void webserver_access_log_page() {
+  check_authentication();
   File file = LittleFS.open("/access_log.html", FILE_READ);
   server.streamFile(file, "text/html");
   file.close();
 }
 void webserver_diagnostics_page() {
+  check_authentication();
   File file = LittleFS.open("/diagnostics.html", FILE_READ);
   server.streamFile(file, "text/html");
   file.close();
@@ -504,6 +571,7 @@ void setup() {
     Serial.println("LittleFS Mounted!");
   }
   initialize_card_database();
+  initialize_access_log();
   copy_static_files_to_filesystem();
 
   Network.onEvent(onEvent);
@@ -541,7 +609,15 @@ void setup() {
   Serial.println("HTTP server started");
 }
 
+long prune_counter = 0;
 void loop() {
+  prune_counter++;
+  if (prune_counter>(10*60*60*12)){
+    prune_access_log();
+    prune_counter=0;
+  }
+    
+
   if (eth_connected) {
     server.handleClient();
   }
@@ -549,8 +625,16 @@ void loop() {
     Serial.println("I have a card!");
     unsigned long card = getIDOfCurrentCard();
     if (card_in_database(card)) {
+      add_card_to_log(card,true);
       Serial.println("Entry Granted!");
+      set_strike(0, false);
+      set_strike(1, false);
+      delay(5000);
+      set_strike(0, true);
+      set_strike(1, true);
+      
     } else {
+      add_card_to_log(card,false);
       Serial.println("INVALID Card!");
     }
     Serial.println(card);
