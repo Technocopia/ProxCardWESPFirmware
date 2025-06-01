@@ -4,6 +4,7 @@
 */
 #include "secret.h"
 #include <WebServer.h>
+#include <uri/UriBraces.h>
 #include <Wire.h>
 #include <ADS7828.h>
 #include "FS.h"
@@ -59,6 +60,7 @@ ADS7828 adc;
 
 
 WebServer server(80);
+String authFailResponse = "Authentication Failed";
 
 // WARNING: onEvent is called from a separate FreeRTOS task (thread)!
 void onEvent(arduino_event_id_t event) {
@@ -212,9 +214,9 @@ void i2c_scan() {
   delay(5000); // wait 5 seconds for next scan
 }
 
+String db_path = "/card_database";
 
-void load_cards_from_filesystem(){
-  String db_path = "/card_database";
+void initialize_card_database(){
   // If the database file is not present, create it
   if (!LittleFS.exists(db_path)){
     Serial.println("Database Missing, Creating an empty one");
@@ -222,17 +224,47 @@ void load_cards_from_filesystem(){
     file.print("");
     file.close();
   }
-
-  File file = LittleFS.open(db_path, FILE_READ);
-  while(file.available()){
-    String card_string = file.readStringUntil('\n');
-    Serial.print(card_string);
-  }
-  file.close();
-
 }
 
-String authFailResponse = "Authentication Failed";
+bool card_in_database(unsigned long card){
+  File file = LittleFS.open(db_path, FILE_READ);
+  while(file.available()){
+    String card_line = file.readStringUntil('\n');
+    if (card_line.toInt() == card){
+      file.close();
+      return true;
+    }
+  }
+  file.close();
+  return false;
+}
+
+void add_card_to_database(String card){
+  File file = LittleFS.open(db_path, FILE_APPEND);
+  String san_card = String(card.toInt());
+  file.println(san_card);
+  file.close();
+}
+
+void remove_card_from_database(String card){
+  String cards_file = "";
+  File file = LittleFS.open(db_path, FILE_READ);
+  while(file.available()){
+    String card_line = file.readStringUntil('\n');
+    if (card_line==card){
+
+    } else {
+      cards_file += card_line + "\n";
+    }
+  }
+  file.close();
+  
+  file = LittleFS.open(db_path, FILE_WRITE);
+  file.print(cards_file);
+  file.close();
+}
+
+
 
 void webserver_handle_root() {
   if (!server.authenticate(www_username, www_password)){
@@ -241,11 +273,33 @@ void webserver_handle_root() {
   server.send(200,"text/html","<h1>Sup?</h1>");
 }
 
-void webserver_handle_card() {
+void webserver_handle_card_put() {
   if (!server.authenticate(www_username, www_password)){
     return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
   }
-  server.send(200,"text/html","<h1>Card!</h1>");
+  String card = server.pathArg(0);
+  Serial.println("ADD "+card);
+  add_card_to_database(card);
+  server.send(200,"text/html",card);
+}
+
+void webserver_handle_card_delete() {
+  if (!server.authenticate(www_username, www_password)){
+    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  }
+  String card = server.pathArg(0);
+  Serial.println("REMOVE "+card);
+  remove_card_from_database(card);
+  server.send(200,"text/html",card);
+}
+
+void webserver_get_card_list(){
+  if (!server.authenticate(www_username, www_password)){
+    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  }
+  File file = LittleFS.open(db_path, FILE_READ);
+  server.streamFile(file,"text/plain");
+  file.close();
 }
 
 void setup() {
@@ -292,13 +346,16 @@ void setup() {
   } else {
     Serial.println("LittleFS Mounted!");
   }
-  load_cards_from_filesystem();
+  initialize_card_database();
 
   Network.onEvent(onEvent);
   ETH.begin();
+
   // Configure Web Server
   server.on("/", webserver_handle_root);
-  server.on("/card",webserver_handle_card);
+  server.on(UriBraces("/card/{}"),HTTP_PUT,webserver_handle_card_put);
+  server.on(UriBraces("/card/{}"),HTTP_DELETE,webserver_handle_card_delete);
+  server.on("/cards",HTTP_GET,webserver_get_card_list);
 
   // Start the web server
   server.begin();
@@ -312,6 +369,11 @@ void loop() {
   if (haveCard()){
     Serial.println("I have a card!");
     unsigned long card = getIDOfCurrentCard();
+    if (card_in_database(card)){
+      Serial.println("Entry Granted!");
+    } else {
+      Serial.println("INVALID Card!");
+    }
     Serial.println(card);
   }
   delay(100);
