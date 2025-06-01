@@ -58,6 +58,9 @@ ADS7828 adc;
 #define ADC_12V_FB 5            // Voltage of 12V BUS
 #define ADC_STRIKE_1_CURRENT 6  // Current through Strike 1
 #define ADC_READER_CURRENT 7    // Current to Card Reader
+#define vdiv_scale_f 5.7
+#define adc_to_v 0.00061035156
+
 
 
 WebServer server(80);
@@ -96,7 +99,25 @@ void onEvent(arduino_event_id_t event) {
 
 
 
-
+bool set_strike(int strike, bool state) {
+  float v;
+  switch (strike) {
+    case 0:
+      digitalWrite(SOLENOID_A_PIN, state);
+      v = adc.read(ADC_STRIKE_FB0) * adc_to_v * vdiv_scale_f;
+      break;
+    case 1:
+      digitalWrite(SOLENOID_B_PIN, state);
+      v = adc.read(ADC_STRIKE_FB0) * adc_to_v * vdiv_scale_f;
+      break;
+  }
+  if (state) {
+    if (v > 11.0) return true;
+  } else {
+    if (v < 1.0) return true;
+  }
+  return false;
+}
 
 
 // Wiegand 0 bit ISR. Triggered by wiegand 0 wire.
@@ -265,9 +286,9 @@ void remove_card_from_database(String card) {
   file.close();
 }
 
-bool auth_enabled=true;
+bool auth_enabled = true;
 
-void check_authentication(){
+void check_authentication() {
   if (auth_enabled) {
     if (!server.authenticate(www_username, www_password)) {
       return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
@@ -310,35 +331,98 @@ void webserver_get_card_list() {
   file.close();
 }
 
-void webserver_strike_list(){
+void webserver_strike_list() {
   server.send(200, "text/plain", "0\n1\n");
 }
 
-void webserver_strike_status(){
-  server.send(200, "text/plain", "True");
+void webserver_strike_status() {
+  unsigned int strike = server.pathArg(0).toInt();
+  int adc_chan = -1;
+  switch (strike) {
+    case 0:
+      adc_chan = ADC_STRIKE_FB0;
+      break;
+    case 1:
+      adc_chan = ADC_STRIKE_FB1;
+      break;
+  }
+  float strike_v = adc.read(adc_chan) * adc_to_v * vdiv_scale_f;
+  String status;
+  if (strike_v > 11.0) {
+    status = "Good Electrical Connection";
+  } else {
+    status = "Bad connection or burnt out";
+  }
+
+
+  server.send(200, "text/plain", status);
 }
 
-void webserver_strike_current(){
-  server.send(200, "text/plain", "300mA");
+void webserver_strike_current() {
+  unsigned int strike = server.pathArg(0).toInt();
+  int adc_chan = -1;
+  switch (strike) {
+    case 0:
+      adc_chan = ADC_STRIKE_0_CURRENT;
+      break;
+    case 1:
+      adc_chan = ADC_STRIKE_1_CURRENT;
+      break;
+  }
+  float strike_a = (adc.read(adc_chan) * adc_to_v * vdiv_scale_f) / 0.1;
+  server.send(200, "text/plain", String(strike_a));
 }
 
-void webserver_strike_connected(){
-  server.send(200, "text/plain", "true");
+void webserver_strike_connected() {
+  unsigned int strike = server.pathArg(0).toInt();
+  int adc_chan = -1;
+  switch (strike) {
+    case 0:
+      adc_chan = ADC_STRIKE_FB0;
+      break;
+    case 1:
+      adc_chan = ADC_STRIKE_FB1;
+      break;
+  }
+  float strike_v = adc.read(adc_chan) * adc_to_v * vdiv_scale_f;
+  String connected;
+  if (strike_v > 11.0) {
+    connected = "true";
+  } else {
+    connected = "false";
+  }
+
+
+  server.send(200, "text/plain", connected);
 }
 
-void webserver_strike_actuate(){
-  server.send(200, "text/plain", "");
+void webserver_strike_actuate() {
+  unsigned int strike = server.pathArg(0).toInt();
+  if (set_strike(strike, false)) {
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(200, "text/plain", "Fail");
+  }
+  delay(5000);
+  set_strike(strike, true);
 }
 
-void webserver_cardreader_current(){
-  server.send(200, "text/plain", "250");
+void webserver_cardreader_current() {
+  float reader_a = (adc.read(ADC_READER_CURRENT) * adc_to_v * vdiv_scale_f) / 0.1;
+  server.send(200, "text/plain", String(reader_a));
 }
 
-void webserver_cardreader_fuse(){
-  server.send(200, "text/plain", "true");
+void webserver_cardreader_fuse() {
+  float fuse_v = (adc.read(ADC_READER_FUSE_FB) * adc_to_v * vdiv_scale_f);
+  if (fuse_v > 11.0) {
+    server.send(200, "text/plain", "true");
+  }
+  else {
+    server.send(200, "text/plain", "false");
+  }
 }
 
-void webserver_access_log(){
+void webserver_access_log() {
   server.send(200, "text/plain", "1231231\n1231231\n12312321\n123123\n12313\n");
 }
 
@@ -348,31 +432,30 @@ void webserver_handle_root() {
   server.streamFile(file, "text/html");
   file.close();
 }
-void webserver_access_log_page(){
+void webserver_access_log_page() {
   File file = LittleFS.open("/access_log.html", FILE_READ);
   server.streamFile(file, "text/html");
   file.close();
 }
-void webserver_diagnostics_page(){
+void webserver_diagnostics_page() {
   File file = LittleFS.open("/diagnostics.html", FILE_READ);
   server.streamFile(file, "text/html");
   file.close();
 }
 
-void copy_static_files_to_filesystem(){
+void copy_static_files_to_filesystem() {
   Serial.println("Initializing Web Files");
   File file = LittleFS.open("/index.html", FILE_WRITE);
-  file.write(index_html,index_html_len);
+  file.write(index_html, index_html_len);
   file.close();
 
   file = LittleFS.open("/access_log.html", FILE_WRITE);
-  file.write(access_log_html,access_log_html_len);
+  file.write(access_log_html, access_log_html_len);
   file.close();
 
   file = LittleFS.open("/diagnostics.html", FILE_WRITE);
-  file.write(diagnostics_html,diagnostics_html_len);
+  file.write(diagnostics_html, diagnostics_html_len);
   file.close();
-
 }
 
 void setup() {
@@ -395,21 +478,22 @@ void setup() {
   Wire.begin(SENSOR_SDA, SENSOR_SCL);
   //i2c_scan();
   adc.begin(0);
+  adc.setpd(IREF_ON_AD_ON);
 
   Serial.print("Reader Fuse: ");
-  Serial.print(adc.read(ADC_READER_FUSE_FB));
+  Serial.print(adc.read(ADC_READER_FUSE_FB) * adc_to_v * vdiv_scale_f);
   Serial.println("v");
 
   Serial.print("12v BUS: ");
-  Serial.print(adc.read(ADC_12V_FB));
+  Serial.print(adc.read(ADC_12V_FB) * adc_to_v * vdiv_scale_f);
   Serial.println("v");
 
   Serial.print("Strike 0: ");
-  Serial.print(adc.read(ADC_STRIKE_FB0));
+  Serial.print(adc.read(ADC_STRIKE_FB0) * adc_to_v * vdiv_scale_f);
   Serial.println("v");
 
   Serial.print("Strike 1: ");
-  Serial.print(adc.read(ADC_STRIKE_FB0));
+  Serial.print(adc.read(ADC_STRIKE_FB1) * adc_to_v * vdiv_scale_f);
   Serial.println("v");
 
   // Mount internal Filesystem
@@ -427,9 +511,9 @@ void setup() {
 
   // Configure Web Server
   server.on("/", webserver_handle_root);
-  server.on("/index.html",webserver_handle_root);
-  server.on("/access_log.html",webserver_access_log_page);
-  server.on("/diagnostics.html",webserver_diagnostics_page);
+  server.on("/index.html", webserver_handle_root);
+  server.on("/access_log.html", webserver_access_log_page);
+  server.on("/diagnostics.html", webserver_diagnostics_page);
 
 
   server.on(UriBraces("/card/{}"), HTTP_PUT, webserver_handle_card_put);
@@ -437,16 +521,16 @@ void setup() {
   server.on(UriBraces("/card/{}"), HTTP_OPTIONS, webserver_handle_card_options);
   server.on("/cards", HTTP_GET, webserver_get_card_list);
 
-  server.on(UriBraces("/diagnostics/strike/{}/status"),HTTP_GET,webserver_strike_status);
-  server.on(UriBraces("/diagnostics/strike/{}/current"),HTTP_GET,webserver_strike_current);
-  server.on(UriBraces("/diagnostics/strike/{}/connected"),HTTP_GET,webserver_strike_connected);
-  server.on(UriBraces("/diagnostics/strike/{}/actuate"),HTTP_GET,webserver_strike_actuate);
-  server.on("/diagnostics/strikes",HTTP_GET,webserver_strike_list);
+  server.on(UriBraces("/diagnostics/strike/{}/status"), HTTP_GET, webserver_strike_status);
+  server.on(UriBraces("/diagnostics/strike/{}/current"), HTTP_GET, webserver_strike_current);
+  server.on(UriBraces("/diagnostics/strike/{}/connected"), HTTP_GET, webserver_strike_connected);
+  server.on(UriBraces("/diagnostics/strike/{}/actuate"), HTTP_PUT, webserver_strike_actuate);
+  server.on("/diagnostics/strikes", HTTP_GET, webserver_strike_list);
 
-  server.on("/diagnostics/cardreader/current",HTTP_GET,webserver_cardreader_current);
+  server.on("/diagnostics/cardreader/current", HTTP_GET, webserver_cardreader_current);
 
-  server.on("/diagnostics/cardreader/fuse",HTTP_GET,webserver_cardreader_fuse);
-  server.on("/access",HTTP_GET,webserver_access_log);
+  server.on("/diagnostics/cardreader/fuse", HTTP_GET, webserver_cardreader_fuse);
+  server.on("/access", HTTP_GET, webserver_access_log);
 
 
 
