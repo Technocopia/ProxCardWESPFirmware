@@ -14,27 +14,27 @@
 // Important to be defined BEFORE including ETH.h for ETH.begin() to work.
 
 #define ETH_PHY_TYPE ETH_PHY_RTL8201
-#define ETH_PHY_ADDR  -1
-#define ETH_PHY_MDC   16
-#define ETH_PHY_MDIO  17
+#define ETH_PHY_ADDR -1
+#define ETH_PHY_MDC 16
+#define ETH_PHY_MDIO 17
 #define ETH_PHY_POWER -1
-#define ETH_CLK_MODE  ETH_CLOCK_GPIO0_IN
+#define ETH_CLK_MODE ETH_CLOCK_GPIO0_IN
 #include <ETH.h>
 static bool eth_connected = false;
 
 #define SOLENOID_A_PIN 13
 #define SOLENOID_B_PIN 18
 
-#define SENSOR_SDA      15
-#define SENSOR_SCL      4
+#define SENSOR_SDA 15
+#define SENSOR_SCL 4
 
-#define RS485_DI        33
-#define RS485_RO        39
-#define RS485_DE        12
-#define RS485_RE        36
+#define RS485_DI 33
+#define RS485_RO 39
+#define RS485_DE 12
+#define RS485_RE 36
 
-#define READER_W0       35
-#define READER_W1       34
+#define READER_W0 35
+#define READER_W1 34
 
 // Global variable to store wigand bits
 unsigned long long bitw = 0;
@@ -43,20 +43,20 @@ unsigned int timeout = 1000;
 // Count of RX'd bits in wiegand burst
 int bitcnt = 0;
 
-#define LED_D6          14
-#define LED_D7          5
+#define LED_D6 14
+#define LED_D7 5
 
 ADS7828 adc;
-#define ADC_READER_FUSE_FB    0
-#define ADC_STRIKE_FB0        1   // Lowside of the coil goes through a VDIV,
-                                  // should read ~12v when coil is connected
-#define ADC_STRIKE_FB1        2   // Lowside of the coil goes through a VDIV,
-                                  // should read ~12v when coil is connected
-#define ADC_STRIKE_0_CURRENT  3   // Current through Strike 0
-#define ADC_DC_CONNECTOR_FB   4   // Voltage at Aux DC in conn.
-#define ADC_12V_FB            5   // Voltage of 12V BUS
-#define ADC_STRIKE_1_CURRENT  6   // Current through Strike 1
-#define ADC_READER_CURRENT    7   // Current to Card Reader
+#define ADC_READER_FUSE_FB 0
+#define ADC_STRIKE_FB0 1        // Lowside of the coil goes through a VDIV, \
+                                // should read ~12v when coil is connected
+#define ADC_STRIKE_FB1 2        // Lowside of the coil goes through a VDIV, \
+                                // should read ~12v when coil is connected
+#define ADC_STRIKE_0_CURRENT 3  // Current through Strike 0
+#define ADC_DC_CONNECTOR_FB 4   // Voltage at Aux DC in conn.
+#define ADC_12V_FB 5            // Voltage of 12V BUS
+#define ADC_STRIKE_1_CURRENT 6  // Current through Strike 1
+#define ADC_READER_CURRENT 7    // Current to Card Reader
 
 
 WebServer server(80);
@@ -100,88 +100,87 @@ void onEvent(arduino_event_id_t event) {
 
 // Wiegand 0 bit ISR. Triggered by wiegand 0 wire.
 void IRAM_ATTR W0ISR() {
-	if (digitalRead(READER_W0))
-		return;
-	//portEXIT_CRITICAL(&mux);
-	bitw = (bitw << 1) | 0x0; // shift in a 0 bit.
-	bitcnt++;               // Increment bit count
-	timeout = millis();         // Reset timeout
-	//portEXIT_CRITICAL(&mux);
-
+  if (digitalRead(READER_W0))
+    return;
+  //portEXIT_CRITICAL(&mux);
+  bitw = (bitw << 1) | 0x0;  // shift in a 0 bit.
+  bitcnt++;                  // Increment bit count
+  timeout = millis();        // Reset timeout
+                             //portEXIT_CRITICAL(&mux);
 }
 
 // Wiegand 1 bit ISR. Triggered by wiegand 1 wire.
 
 void IRAM_ATTR W1ISR() {
-	if (digitalRead(READER_W1))
-		return;
-	//portEXIT_CRITICAL(&mux);
-	bitw = (bitw << 1) | 0x1; // shift in a 1 bit
-	bitcnt++;               // Increment bit count
-	timeout = millis();         // Reset Timeout
-	//portEXIT_CRITICAL(&mux);
+  if (digitalRead(READER_W1))
+    return;
+  //portEXIT_CRITICAL(&mux);
+  bitw = (bitw << 1) | 0x1;  // shift in a 1 bit
+  bitcnt++;                  // Increment bit count
+  timeout = millis();        // Reset Timeout
+                             //portEXIT_CRITICAL(&mux);
 }
 
 // Check for end of wiegand bitstream
 // by waiting for last bit rx to be 500 ms ago and the rx of enough bits.
 bool haveCard() {
-	return (((millis() - timeout) > 500) && bitcnt > 30);
+  return (((millis() - timeout) > 500) && bitcnt > 30);
 }
 
 // Perform parity calculation
 int parity(unsigned long int x) {
-	unsigned long int y;
-	y = x ^ (x >> 1);
-	y = y ^ (y >> 2);
-	y = y ^ (y >> 4);
-	y = y ^ (y >> 8);
-	y = y ^ (y >> 16);
-	return y & 1;
+  unsigned long int y;
+  y = x ^ (x >> 1);
+  y = y ^ (y >> 2);
+  y = y ^ (y >> 4);
+  y = y ^ (y >> 8);
+  y = y ^ (y >> 16);
+  return y & 1;
 }
 
 // Decode card info and clear bit's RX'd.
 long int getIDOfCurrentCard() {
-	unsigned long long bitwtmp = bitw;
-	int bitcnttmp = bitcnt;
-	bitcnt = 0;
-	bitw = 0;
-	//portEXIT_CRITICAL(&mux);
-	for (int i = bitcnttmp; i != 0; i--)
-		Serial.print((unsigned int) (bitwtmp >> (i - 1) & 0x00000001)); // Print the card number in binary
-	Serial.print(" (");
-	Serial.print(bitcnttmp);
-	Serial.println(")");
-	boolean ep, op;
-	unsigned int site;
-	unsigned long int card;
+  unsigned long long bitwtmp = bitw;
+  int bitcnttmp = bitcnt;
+  bitcnt = 0;
+  bitw = 0;
+  //portEXIT_CRITICAL(&mux);
+  for (int i = bitcnttmp; i != 0; i--)
+    Serial.print((unsigned int)(bitwtmp >> (i - 1) & 0x00000001));  // Print the card number in binary
+  Serial.print(" (");
+  Serial.print(bitcnttmp);
+  Serial.println(")");
+  boolean ep, op;
+  unsigned int site;
+  unsigned long int card;
 
-	// Pick apart card.
-	site = (bitwtmp >> 25) & 0x00007f;
-	card = (bitwtmp >> 1) & 0xffffff;
-	op = (bitwtmp >> 0) & 0x000001;
-	ep = (bitwtmp >> 32) & 0x000001;
+  // Pick apart card.
+  site = (bitwtmp >> 25) & 0x00007f;
+  card = (bitwtmp >> 1) & 0xffffff;
+  op = (bitwtmp >> 0) & 0x000001;
+  ep = (bitwtmp >> 32) & 0x000001;
 
-	// Check parity
-	//if (parity(site) != ep)
-	//	valid = false;
-	//if (parity(card) == op)
-	//	valid = false;
+  // Check parity
+  //if (parity(site) != ep)
+  //	valid = false;
+  //if (parity(card) == op)
+  //	valid = false;
 
-	// Print card info
-	Serial.print("Got " + String());
-	Serial.print("Site: ");
-	Serial.println(site);
-	Serial.print("Card: ");
-	Serial.println(card);
-	Serial.print("ep: ");
-	Serial.print(parity(site));
-	Serial.println(ep);
-	Serial.print("op: ");
-	Serial.print(parity(card));
-	Serial.println(op);
+  // Print card info
+  Serial.print("Got " + String());
+  Serial.print("Site: ");
+  Serial.println(site);
+  Serial.print("Card: ");
+  Serial.println(card);
+  Serial.print("ep: ");
+  Serial.print(parity(site));
+  Serial.println(ep);
+  Serial.print("op: ");
+  Serial.print(parity(card));
+  Serial.println(op);
 
-	//valid = true;
-	return card;
+  //valid = true;
+  return card;
 }
 
 void i2c_scan() {
@@ -190,7 +189,7 @@ void i2c_scan() {
   Serial.println();
   Serial.println("Scanning...");
   nDevices = 0;
-  for (address = 1; address < 127; address++ )  {
+  for (address = 1; address < 127; address++) {
     Wire.beginTransmission(address);
     error = Wire.endTransmission();
     if (error == 0) {
@@ -211,14 +210,14 @@ void i2c_scan() {
     Serial.println("No I2C devices found\n");
   else
     Serial.println("done\n");
-  delay(5000); // wait 5 seconds for next scan
+  delay(5000);  // wait 5 seconds for next scan
 }
 
 String db_path = "/card_database";
 
-void initialize_card_database(){
+void initialize_card_database() {
   // If the database file is not present, create it
-  if (!LittleFS.exists(db_path)){
+  if (!LittleFS.exists(db_path)) {
     Serial.println("Database Missing, Creating an empty one");
     File file = LittleFS.open(db_path, FILE_WRITE);
     file.print("");
@@ -226,11 +225,11 @@ void initialize_card_database(){
   }
 }
 
-bool card_in_database(unsigned long card){
+bool card_in_database(unsigned long card) {
   File file = LittleFS.open(db_path, FILE_READ);
-  while(file.available()){
+  while (file.available()) {
     String card_line = file.readStringUntil('\n');
-    if (card_line.toInt() == card){
+    if (card_line.toInt() == card) {
       file.close();
       return true;
     }
@@ -239,66 +238,81 @@ bool card_in_database(unsigned long card){
   return false;
 }
 
-void add_card_to_database(String card){
+void add_card_to_database(String card) {
   File file = LittleFS.open(db_path, FILE_APPEND);
   String san_card = String(card.toInt());
   file.println(san_card);
   file.close();
 }
 
-void remove_card_from_database(String card){
+void remove_card_from_database(String card) {
   String cards_file = "";
   File file = LittleFS.open(db_path, FILE_READ);
-  while(file.available()){
+  while (file.available()) {
     String card_line = file.readStringUntil('\n');
-    if (card_line==card){
+    if (card_line.toInt() == card.toInt()) {
 
     } else {
       cards_file += card_line + "\n";
     }
   }
   file.close();
-  
+
   file = LittleFS.open(db_path, FILE_WRITE);
   file.print(cards_file);
   file.close();
 }
 
-
+bool auth_enabled=false;
 
 void webserver_handle_root() {
-  if (!server.authenticate(www_username, www_password)){
-    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  if (auth_enabled) {
+    if (!server.authenticate(www_username, www_password)) {
+      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+    }
   }
-  server.send(200,"text/html","<h1>Sup?</h1>");
+  server.send(200, "text/html", "<h1>Sup?</h1>");
+}
+
+void webserver_handle_card_options() {
+  if (auth_enabled) {
+    if (!server.authenticate(www_username, www_password)) {
+      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+    }
+  }
+  server.send(200, "text/plain", "");
 }
 
 void webserver_handle_card_put() {
-  if (!server.authenticate(www_username, www_password)){
-    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  if (auth_enabled) {
+    if (!server.authenticate(www_username, www_password)) {
+      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+    }
   }
   String card = server.pathArg(0);
-  Serial.println("ADD "+card);
+  Serial.println("ADD " + card);
   add_card_to_database(card);
-  server.send(200,"text/html",card);
+  server.send(200, "text/plain", card);
 }
 
 void webserver_handle_card_delete() {
-  if (!server.authenticate(www_username, www_password)){
-    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  if (auth_enabled) {
+    if (!server.authenticate(www_username, www_password)) {
+      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+    }
   }
   String card = server.pathArg(0);
-  Serial.println("REMOVE "+card);
+  Serial.println("REMOVE " + card);
   remove_card_from_database(card);
-  server.send(200,"text/html",card);
+  server.send(200, "text/plain", card);
 }
 
-void webserver_get_card_list(){
-  if (!server.authenticate(www_username, www_password)){
-    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
-  }
+void webserver_get_card_list() {
+  //if (!server.authenticate(www_username, www_password)){
+  //  return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  //}
   File file = LittleFS.open(db_path, FILE_READ);
-  server.streamFile(file,"text/plain");
+  server.streamFile(file, "text/plain");
   file.close();
 }
 
@@ -308,18 +322,18 @@ void setup() {
   Serial.println("Technocopia Card Reader Startup!");
   // setup GPIO for wiegand
   pinMode(READER_W0, INPUT_PULLUP);
-	pinMode(READER_W1, INPUT_PULLUP);
+  pinMode(READER_W1, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(READER_W0), W0ISR, FALLING);
-	attachInterrupt(digitalPinToInterrupt(READER_W1), W1ISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(READER_W1), W1ISR, FALLING);
 
   // setup GPIO for Solenoids
   pinMode(SOLENOID_A_PIN, OUTPUT);
-	pinMode(SOLENOID_B_PIN, OUTPUT);
-	digitalWrite(SOLENOID_A_PIN, HIGH);
-	digitalWrite(SOLENOID_B_PIN, HIGH);
+  pinMode(SOLENOID_B_PIN, OUTPUT);
+  digitalWrite(SOLENOID_A_PIN, HIGH);
+  digitalWrite(SOLENOID_B_PIN, HIGH);
 
   // Setup i2c for board sensors
-  Wire.begin(SENSOR_SDA,SENSOR_SCL);
+  Wire.begin(SENSOR_SDA, SENSOR_SCL);
   //i2c_scan();
   adc.begin(0);
 
@@ -353,9 +367,10 @@ void setup() {
 
   // Configure Web Server
   server.on("/", webserver_handle_root);
-  server.on(UriBraces("/card/{}"),HTTP_PUT,webserver_handle_card_put);
-  server.on(UriBraces("/card/{}"),HTTP_DELETE,webserver_handle_card_delete);
-  server.on("/cards",HTTP_GET,webserver_get_card_list);
+  server.on(UriBraces("/card/{}"), HTTP_PUT, webserver_handle_card_put);
+  server.on(UriBraces("/card/{}"), HTTP_DELETE, webserver_handle_card_delete);
+  server.on(UriBraces("/card/{}"), HTTP_OPTIONS, webserver_handle_card_options);
+  server.on("/cards", HTTP_GET, webserver_get_card_list);
 
   // Start the web server
   server.begin();
@@ -366,10 +381,10 @@ void loop() {
   if (eth_connected) {
     server.handleClient();
   }
-  if (haveCard()){
+  if (haveCard()) {
     Serial.println("I have a card!");
     unsigned long card = getIDOfCurrentCard();
-    if (card_in_database(card)){
+    if (card_in_database(card)) {
       Serial.println("Entry Granted!");
     } else {
       Serial.println("INVALID Card!");
