@@ -265,7 +265,7 @@ void remove_card_from_database(String card) {
   file.close();
 }
 
-bool auth_enabled=True;
+bool auth_enabled=true;
 
 void check_authentication(){
   if (auth_enabled) {
