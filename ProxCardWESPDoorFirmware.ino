@@ -2,9 +2,13 @@
     This sketch shows the Ethernet event usage
 
 */
-
+#include "secret.h"
+#include <WebServer.h>
 #include <Wire.h>
 #include <ADS7828.h>
+#include "FS.h"
+#include <LittleFS.h>
+#define FORMAT_LITTLEFS_IF_FAILED true
 
 // Important to be defined BEFORE including ETH.h for ETH.begin() to work.
 
@@ -52,6 +56,9 @@ ADS7828 adc;
 #define ADC_12V_FB            5   // Voltage of 12V BUS
 #define ADC_STRIKE_1_CURRENT  6   // Current through Strike 1
 #define ADC_READER_CURRENT    7   // Current to Card Reader
+
+
+WebServer server(80);
 
 // WARNING: onEvent is called from a separate FreeRTOS task (thread)!
 void onEvent(arduino_event_id_t event) {
@@ -119,6 +126,7 @@ bool haveCard() {
 	return (((millis() - timeout) > 500) && bitcnt > 30);
 }
 
+// Perform parity calculation
 int parity(unsigned long int x) {
 	unsigned long int y;
 	y = x ^ (x >> 1);
@@ -204,6 +212,42 @@ void i2c_scan() {
   delay(5000); // wait 5 seconds for next scan
 }
 
+
+void load_cards_from_filesystem(){
+  String db_path = "/card_database";
+  // If the database file is not present, create it
+  if (!LittleFS.exists(db_path)){
+    Serial.println("Database Missing, Creating an empty one");
+    File file = LittleFS.open(db_path, FILE_WRITE);
+    file.print("");
+    file.close();
+  }
+
+  File file = LittleFS.open(db_path, FILE_READ);
+  while(file.available()){
+    String card_string = file.readStringUntil('\n');
+    Serial.print(card_string);
+  }
+  file.close();
+
+}
+
+String authFailResponse = "Authentication Failed";
+
+void webserver_handle_root() {
+  if (!server.authenticate(www_username, www_password)){
+    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  }
+  server.send(200,"text/html","<h1>Sup?</h1>");
+}
+
+void webserver_handle_card() {
+  if (!server.authenticate(www_username, www_password)){
+    return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+  }
+  server.send(200,"text/html","<h1>Card!</h1>");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -241,13 +285,29 @@ void setup() {
   Serial.print(adc.read(ADC_STRIKE_FB0));
   Serial.println("v");
 
+  // Mount internal Filesystem
+  if (!LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED)) {
+    Serial.println("LittleFS Mount Failed");
+    return;
+  } else {
+    Serial.println("LittleFS Mounted!");
+  }
+  load_cards_from_filesystem();
+
   Network.onEvent(onEvent);
   ETH.begin();
+  // Configure Web Server
+  server.on("/", webserver_handle_root);
+  server.on("/card",webserver_handle_card);
+
+  // Start the web server
+  server.begin();
+  Serial.println("HTTP server started");
 }
 
 void loop() {
   if (eth_connected) {
-    
+    server.handleClient();
   }
   if (haveCard()){
     Serial.println("I have a card!");
