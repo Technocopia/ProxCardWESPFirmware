@@ -3,14 +3,25 @@
 
 */
 #include "secret.h"
-#include <WebServer.h>
-#include <uri/UriBraces.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
 #include <Wire.h>
 #include <ADS7828.h>
 #include "FS.h"
 #include <LittleFS.h>
 #include <static_files.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+#include <freertos/timers.h>
+#include "one_param_rewrite.h"
 #define FORMAT_LITTLEFS_IF_FAILED true
+
+// Authentication type definition
+#define DIGEST_AUTH "Digest"
+
+// Mutex for file access synchronization
+SemaphoreHandle_t access_log_mutex = NULL;
 
 // Important to be defined BEFORE including ETH.h for ETH.begin() to work.
 
@@ -61,13 +72,52 @@ ADS7828 adc;
 #define vdiv_scale_f 5.7
 #define adc_to_v 0.00061035156
 
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = -18000;
-const int   daylightOffset_sec = 3600;
+const char *ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -18000;
+const int daylightOffset_sec = 3600;
 
 
-WebServer server(80);
-String authFailResponse = "Authentication Failed";
+AsyncWebServer server(80);
+static AsyncAuthenticationMiddleware basicAuth;
+
+// Timer handle for solenoid reset
+TimerHandle_t solenoidResetTimer = NULL;
+
+// Timer callback function
+void solenoidResetCallback(TimerHandle_t xTimer) {
+  int strike = (int)pvTimerGetTimerID(xTimer);
+  set_strike(strike, true);
+}
+
+void debug_dump_params(AsyncWebServerRequest *request) {
+  int params = request->params();
+  Serial.println("Params: ");
+  for (int i = 0; i < params; i++) {
+    const AsyncWebParameter *p = request->getParam(i);
+    if (p->isFile()) {  //p->isPost() is also true
+      Serial.printf("FILE[%s]: %s, size: %u\n", p->name().c_str(), p->value().c_str(), p->size());
+    } else if (p->isPost()) {
+      Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+    } else {
+      Serial.printf("GET[%s]: %s\n", p->name().c_str(), p->value().c_str());
+    }
+  }  // for(int i=0;i<params;i++)
+}
+
+void copy_static_files_to_filesystem() {
+  Serial.println("Initializing Web Files");
+  File file = LittleFS.open("/index.html", FILE_WRITE);
+  file.write(index_html, index_html_len);
+  file.close();
+
+  file = LittleFS.open("/access_log.html", FILE_WRITE);
+  file.write(access_log_html, access_log_html_len);
+  file.close();
+
+  file = LittleFS.open("/diagnostics.html", FILE_WRITE);
+  file.write(diagnostics_html, diagnostics_html_len);
+  file.close();
+}
 
 // WARNING: onEvent is called from a separate FreeRTOS task (thread)!
 void onEvent(arduino_event_id_t event) {
@@ -83,7 +133,7 @@ void onEvent(arduino_event_id_t event) {
       Serial.println("ETH Got IP");
       Serial.println(ETH);
       eth_connected = true;
-        //init and get the time
+      //init and get the time
       configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
       break;
     case ARDUINO_EVENT_ETH_LOST_IP:
@@ -264,265 +314,99 @@ void remove_card_from_database(String card) {
   file.close();
 }
 
-void initialize_access_log(){
+void initialize_access_log() {
   Serial.println("Initializing Database");
+  // Create mutex for file access
+  access_log_mutex = xSemaphoreCreateMutex();
+  if (access_log_mutex == NULL) {
+    Serial.println("Error creating access log mutex");
+    return;
+  }
+
   // If the database file is not present, create it
   if (!LittleFS.exists("/access_log")) {
     Serial.println("Access Log Missing, Creating an empty one");
-    File file = LittleFS.open("/access_log", FILE_WRITE);
-    file.print("");
-    file.close();
-  }
-
-}
-
-void add_card_to_log(unsigned long card, bool valid_card){
-  File file = LittleFS.open("/access_log", FILE_APPEND);
-  
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time");
-  } else {
-    file.print(&timeinfo, "[ %B %d %Y %H:%M:%S ]    ");
-  }
-  file.print("Access ");
-  file.print(valid_card?"GRANTED":"DENIED");
-  file.println(" for " + String(card) );
-  file.close();
-}
-
-void add_message_to_log(String message){
-  File file = LittleFS.open("/access_log", FILE_APPEND);
-  
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time");
-  } else {
-    file.print(&timeinfo, "[ %B %d %Y %H:%M:%S ]    ");
-  }
-  file.println(message);
-  file.close();  
-}
-
-void prune_access_log(){
-  long max_lines = 10000;
-  File in_file = LittleFS.open("/access_log", FILE_READ);
-
-  // count lines
-  long lines=0;
-  while (in_file.available()) {
-    String card_line = in_file.readStringUntil('\n');
-    lines++;
-  }
-
-  long start_point = lines - max_lines;
-  if (start_point<1) start_point=1;
-  else {
-    Serial.println("Access Log will be pruned");
-  }
-
-  
-  in_file.close();
-
-  in_file = LittleFS.open("/access_log", FILE_READ);
-  File out_file = LittleFS.open("/access_log_prune", FILE_WRITE);
-  lines=0;
-  while (in_file.available()) {
-    String card_line = in_file.readStringUntil('\n');
-    lines++;
-    if (lines<start_point) continue;
-    card_line.trim();
-    out_file.println(card_line);
-  }
-
-  out_file.close();
-  in_file.close();
-  LittleFS.remove("/access_log");
-  LittleFS.rename("/access_log_prune","/access_log");
-
-
-}
-
-bool auth_enabled = true;
-
-void check_authentication() {
-  if (auth_enabled) {
-    if (!server.authenticate(www_username, www_password)) {
-      return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
+    if (xSemaphoreTake(access_log_mutex, portMAX_DELAY) == pdTRUE) {
+      File file = LittleFS.open("/access_log", FILE_WRITE);
+      file.print("");
+      file.close();
+      xSemaphoreGive(access_log_mutex);
     }
   }
 }
 
+void add_card_to_log(unsigned long card, bool valid_card) {
+  if (xSemaphoreTake(access_log_mutex, portMAX_DELAY) == pdTRUE) {
+    File file = LittleFS.open("/access_log", FILE_APPEND);
 
-
-void webserver_handle_card_options() {
-  check_authentication();
-
-  server.send(200, "text/plain", "");
-}
-
-void webserver_handle_card_put() {
-  check_authentication();
-
-  String card = server.pathArg(0);
-  Serial.println("ADD " + card);
-  add_card_to_database(card);
-  server.send(200, "text/plain", card);
-}
-
-void webserver_handle_card_delete() {
-  check_authentication();
-
-  String card = server.pathArg(0);
-  Serial.println("REMOVE " + card);
-  remove_card_from_database(card);
-  server.send(200, "text/plain", card);
-}
-
-void webserver_get_card_list() {
-  check_authentication();
-  File file = LittleFS.open(db_path, FILE_READ);
-  server.streamFile(file, "text/plain");
-  file.close();
-}
-
-void webserver_strike_list() {
-  check_authentication();
-  server.send(200, "text/plain", "0\n1\n");
-}
-
-void webserver_strike_status() {
-  check_authentication();
-  unsigned int strike = server.pathArg(0).toInt();
-  int adc_chan = -1;
-  switch (strike) {
-    case 0:
-      adc_chan = ADC_STRIKE_FB0;
-      break;
-    case 1:
-      adc_chan = ADC_STRIKE_FB1;
-      break;
-  }
-  float strike_v = adc.read(adc_chan) * adc_to_v * vdiv_scale_f;
-  String status;
-  if (strike_v > 11.0) {
-    status = "Good Electrical Connection";
-  } else {
-    status = "Bad connection or burnt out";
-  }
-
-
-  server.send(200, "text/plain", status);
-}
-
-void webserver_strike_current() {
-  check_authentication();
-  unsigned int strike = server.pathArg(0).toInt();
-  int adc_chan = -1;
-  switch (strike) {
-    case 0:
-      adc_chan = ADC_STRIKE_0_CURRENT;
-      break;
-    case 1:
-      adc_chan = ADC_STRIKE_1_CURRENT;
-      break;
-  }
-  float strike_a = (adc.read(adc_chan) * adc_to_v * vdiv_scale_f) / 0.1;
-  server.send(200, "text/plain", String(strike_a));
-}
-
-void webserver_strike_connected() {
-  check_authentication();
-  unsigned int strike = server.pathArg(0).toInt();
-  int adc_chan = -1;
-  switch (strike) {
-    case 0:
-      adc_chan = ADC_STRIKE_FB0;
-      break;
-    case 1:
-      adc_chan = ADC_STRIKE_FB1;
-      break;
-  }
-  float strike_v = adc.read(adc_chan) * adc_to_v * vdiv_scale_f;
-  String connected;
-  if (strike_v > 11.0) {
-    connected = "true";
-  } else {
-    connected = "false";
-  }
-
-
-  server.send(200, "text/plain", connected);
-}
-
-void webserver_strike_actuate() {
-  check_authentication();
-  unsigned int strike = server.pathArg(0).toInt();
-  if (set_strike(strike, false)) {
-    server.send(200, "text/plain", "OK");
-  } else {
-    server.send(200, "text/plain", "Fail");
-  }
-  delay(5000);
-  set_strike(strike, true);
-}
-
-void webserver_cardreader_current() {
-  check_authentication();
-  float reader_a = (adc.read(ADC_READER_CURRENT) * adc_to_v * vdiv_scale_f) / 0.1;
-  server.send(200, "text/plain", String(reader_a));
-}
-
-void webserver_cardreader_fuse() {
-  check_authentication();
-  float fuse_v = (adc.read(ADC_READER_FUSE_FB) * adc_to_v * vdiv_scale_f);
-  if (fuse_v > 11.0) {
-    server.send(200, "text/plain", "true");
-  }
-  else {
-    server.send(200, "text/plain", "false");
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+      Serial.println("Failed to obtain time");
+    } else {
+      file.print(&timeinfo, "[ %B %d %Y %H:%M:%S ]    ");
+    }
+    file.print("Access ");
+    file.print(valid_card ? "GRANTED" : "DENIED");
+    file.println(" for " + String(card));
+    file.close();
+    xSemaphoreGive(access_log_mutex);
   }
 }
 
-void webserver_access_log() {
-  check_authentication();
-  File file = LittleFS.open("/access_log", FILE_READ);
-  server.streamFile(file, "text/plain");
-  file.close();
+void add_message_to_log(String message) {
+  if (xSemaphoreTake(access_log_mutex, portMAX_DELAY) == pdTRUE) {
+    File file = LittleFS.open("/access_log", FILE_APPEND);
+
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+      Serial.println("Failed to obtain time");
+    } else {
+      file.print(&timeinfo, "[ %B %d %Y %H:%M:%S ]    ");
+    }
+    file.println(message);
+    file.close();
+    xSemaphoreGive(access_log_mutex);
+  }
 }
 
-void webserver_handle_root() {
-  check_authentication();
-  File file = LittleFS.open("/index.html", FILE_READ);
-  server.streamFile(file, "text/html");
-  file.close();
-}
-void webserver_access_log_page() {
-  check_authentication();
-  File file = LittleFS.open("/access_log.html", FILE_READ);
-  server.streamFile(file, "text/html");
-  file.close();
-}
-void webserver_diagnostics_page() {
-  check_authentication();
-  File file = LittleFS.open("/diagnostics.html", FILE_READ);
-  server.streamFile(file, "text/html");
-  file.close();
-}
+void prune_access_log() {
+  if (xSemaphoreTake(access_log_mutex, portMAX_DELAY) == pdTRUE) {
+    long max_lines = 10000;
+    File in_file = LittleFS.open("/access_log", FILE_READ);
 
-void copy_static_files_to_filesystem() {
-  Serial.println("Initializing Web Files");
-  File file = LittleFS.open("/index.html", FILE_WRITE);
-  file.write(index_html, index_html_len);
-  file.close();
+    // count lines
+    long lines = 0;
+    while (in_file.available()) {
+      String card_line = in_file.readStringUntil('\n');
+      lines++;
+    }
 
-  file = LittleFS.open("/access_log.html", FILE_WRITE);
-  file.write(access_log_html, access_log_html_len);
-  file.close();
+    long start_point = lines - max_lines;
+    if (start_point < 1) start_point = 1;
+    else {
+      Serial.println("Access Log will be pruned");
+    }
 
-  file = LittleFS.open("/diagnostics.html", FILE_WRITE);
-  file.write(diagnostics_html, diagnostics_html_len);
-  file.close();
+    in_file.close();
+
+    in_file = LittleFS.open("/access_log", FILE_READ);
+    File out_file = LittleFS.open("/access_log_prune", FILE_WRITE);
+    lines = 0;
+    while (in_file.available()) {
+      String card_line = in_file.readStringUntil('\n');
+      lines++;
+      if (lines < start_point) continue;
+      card_line.trim();
+      out_file.println(card_line);
+    }
+
+    out_file.close();
+    in_file.close();
+    LittleFS.remove("/access_log");
+    LittleFS.rename("/access_log_prune", "/access_log");
+
+    xSemaphoreGive(access_log_mutex);
+  }
 }
 
 void setup() {
@@ -543,10 +427,10 @@ void setup() {
 
   // Setup i2c for board sensors
   Wire.begin(SENSOR_SDA, SENSOR_SCL);
-  //i2c_scan();
   adc.begin(0);
   adc.setpd(IREF_ON_AD_ON);
 
+  // Print initial sensor readings
   Serial.print("Reader Fuse: ");
   Serial.print(adc.read(ADC_READER_FUSE_FB) * adc_to_v * vdiv_scale_f);
   Serial.println("v");
@@ -577,32 +461,190 @@ void setup() {
   Network.onEvent(onEvent);
   ETH.begin();
 
-  // Configure Web Server
-  server.on("/", webserver_handle_root);
-  server.on("/index.html", webserver_handle_root);
-  server.on("/access_log.html", webserver_access_log_page);
-  server.on("/diagnostics.html", webserver_diagnostics_page);
+    // Create the solenoid reset timer
+  solenoidResetTimer = xTimerCreate(
+    "solenoidReset",       // Timer name
+    pdMS_TO_TICKS(5000),   // 5 second period
+    pdFALSE,               // One-shot timer
+    (void *)0,             // Initial timer ID (strike number)
+    solenoidResetCallback  // Callback function
+  );
 
+  if (solenoidResetTimer == NULL) {
+    Serial.println("Error creating solenoid reset timer");
+  }
 
-  server.on(UriBraces("/card/{}"), HTTP_PUT, webserver_handle_card_put);
-  server.on(UriBraces("/card/{}"), HTTP_DELETE, webserver_handle_card_delete);
-  server.on(UriBraces("/card/{}"), HTTP_OPTIONS, webserver_handle_card_options);
-  server.on("/cards", HTTP_GET, webserver_get_card_list);
+    // basic authentication
+  basicAuth.setUsername(www_username);
+  basicAuth.setPassword(www_password);
+  basicAuth.setRealm("MyApp");
+  basicAuth.setAuthFailureMessage("Authentication failed");
+  basicAuth.setAuthType(AsyncAuthType::AUTH_BASIC);
+  basicAuth.generateHash();  // precompute hash (optional but recommended)
 
-  server.on(UriBraces("/diagnostics/strike/{}/status"), HTTP_GET, webserver_strike_status);
-  server.on(UriBraces("/diagnostics/strike/{}/current"), HTTP_GET, webserver_strike_current);
-  server.on(UriBraces("/diagnostics/strike/{}/connected"), HTTP_GET, webserver_strike_connected);
-  server.on(UriBraces("/diagnostics/strike/{}/actuate"), HTTP_PUT, webserver_strike_actuate);
-  server.on("/diagnostics/strikes", HTTP_GET, webserver_strike_list);
+  // Configure Async Web Server
+  // Add rewrites to convert path parameters to query parameters
+  server.addRewrite(new OneParamRewrite("/card/{f}", "/card?number={f}"));
+  server.addRewrite(new OneParamRewrite("/diagnostics/strike/{f}/status", "/diagnostics/strike/status?number={f}"));
+  server.addRewrite(new OneParamRewrite("/diagnostics/strike/{f}/current", "/diagnostics/strike/current?number={f}"));
+  server.addRewrite(new OneParamRewrite("/diagnostics/strike/{f}/connected", "/diagnostics/strike/connected?number={f}"));
+  server.addRewrite(new OneParamRewrite("/diagnostics/strike/{f}/actuate", "/diagnostics/strike/actuate?number={f}"));
 
-  server.on("/diagnostics/cardreader/current", HTTP_GET, webserver_cardreader_current);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html", "text/html");
+  }).addMiddleware(&basicAuth);
 
-  server.on("/diagnostics/cardreader/fuse", HTTP_GET, webserver_cardreader_fuse);
-  server.on("/access", HTTP_GET, webserver_access_log);
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html", "text/html");
+  }).addMiddleware(&basicAuth);
 
+  server.on("/access_log.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/access_log.html", "text/html");
+  }).addMiddleware(&basicAuth);
 
+  server.on("/diagnostics.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/diagnostics.html", "text/html");
+  }).addMiddleware(&basicAuth);
 
+  // Card management endpoints
+  server.on("/card", HTTP_PUT, [](AsyncWebServerRequest *request) {
+    debug_dump_params(request);
+    if (!request->hasParam("number")) {
+      request->send(400, "text/plain", "Missing card number parameter");
+      return;
+    }
+    String card = request->getParam("number")->value();
+    // Validate card number is numeric
+    if (!card.toInt()) {
+      request->send(400, "text/plain", "Invalid card number");
+      return;
+    }
+    add_card_to_database(card);
+    request->send(200, "text/plain", card);
+  }).addMiddleware(&basicAuth);
 
+  server.on("/card", HTTP_DELETE, [](AsyncWebServerRequest *request) {
+    debug_dump_params(request);
+    if (!request->hasParam("number")) {
+      request->send(400, "text/plain", "Missing card number parameter");
+      return;
+    }
+    String card = request->getParam("number")->value();
+    // Validate card number is numeric
+    if (!card.toInt()) {
+      request->send(400, "text/plain", "Invalid card number");
+      return;
+    }
+    remove_card_from_database(card);
+    request->send(200, "text/plain", card);
+  }).addMiddleware(&basicAuth);
+
+  server.on("/card", HTTP_OPTIONS, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "");
+  }).addMiddleware(&basicAuth);
+
+  server.on("/cards", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, db_path, "text/plain");
+  }).addMiddleware(&basicAuth);
+
+  // Diagnostics endpoints
+  server.on("/diagnostics/strike/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("number")) {
+      request->send(400, "text/plain", "Missing strike number parameter");
+      return;
+    }
+    String strikeStr = request->getParam("number")->value();
+    unsigned int strike = strikeStr.toInt();
+    // Validate strike number is 0 or 1
+    if (strike > 1) {
+      request->send(400, "text/plain", "Invalid strike number");
+      return;
+    }
+    int adc_chan = (strike == 0) ? ADC_STRIKE_FB0 : ADC_STRIKE_FB1;
+    float strike_v = adc.read(adc_chan) * adc_to_v * vdiv_scale_f;
+    String status = (strike_v > 11.0) ? "Good Electrical Connection" : "Bad connection or burnt out";
+    request->send(200, "text/plain", status);
+  }).addMiddleware(&basicAuth);
+
+  server.on("/diagnostics/strike/current", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("number")) {
+      request->send(400, "text/plain", "Missing strike number parameter");
+      return;
+    }
+    String strikeStr = request->getParam("number")->value();
+    unsigned int strike = strikeStr.toInt();
+    // Validate strike number is 0 or 1
+    if (strike > 1) {
+      request->send(400, "text/plain", "Invalid strike number");
+      return;
+    }
+    int adc_chan = (strike == 0) ? ADC_STRIKE_0_CURRENT : ADC_STRIKE_1_CURRENT;
+    float strike_a = (adc.read(adc_chan) * adc_to_v * vdiv_scale_f) / 0.1;
+    request->send(200, "text/plain", String(strike_a));
+  }).addMiddleware(&basicAuth);
+
+  server.on("/diagnostics/strike/connected", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("number")) {
+      request->send(400, "text/plain", "Missing strike number parameter");
+      return;
+    }
+    String strikeStr = request->getParam("number")->value();
+    unsigned int strike = strikeStr.toInt();
+    // Validate strike number is 0 or 1
+    if (strike > 1) {
+      request->send(400, "text/plain", "Invalid strike number");
+      return;
+    }
+    int adc_chan = (strike == 0) ? ADC_STRIKE_FB0 : ADC_STRIKE_FB1;
+    float strike_v = adc.read(adc_chan) * adc_to_v * vdiv_scale_f;
+    request->send(200, "text/plain", (strike_v > 11.0) ? "true" : "false");
+  }).addMiddleware(&basicAuth);
+
+  // Update the actuate endpoint to use the timer
+  server.on("/diagnostics/strike/actuate", HTTP_PUT, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("number")) {
+      request->send(400, "text/plain", "Missing strike number parameter");
+      return;
+    }
+    String strikeStr = request->getParam("number")->value();
+    unsigned int strike = strikeStr.toInt();
+    // Validate strike number is 0 or 1
+    if (strike > 1) {
+      request->send(400, "text/plain", "Invalid strike number");
+      return;
+    }
+    if (set_strike(strike, false)) {
+      // Set the timer ID to the strike number
+      vTimerSetTimerID(solenoidResetTimer, (void *)strike);
+      // Start the timer
+      if (xTimerStart(solenoidResetTimer, 0) != pdPASS) {
+        Serial.println("Error starting solenoid reset timer");
+        request->send(500, "text/plain", "Error scheduling strike reset");
+        return;
+      }
+      request->send(200, "text/plain", "OK");
+    } else {
+      request->send(200, "text/plain", "Fail");
+    }
+  }).addMiddleware(&basicAuth);
+
+  server.on("/diagnostics/strikes", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "0\n1\n");
+  }).addMiddleware(&basicAuth);
+
+  server.on("/diagnostics/cardreader/current", HTTP_GET, [](AsyncWebServerRequest *request) {
+    float reader_a = (adc.read(ADC_READER_CURRENT) * adc_to_v * vdiv_scale_f) / 0.1;
+    request->send(200, "text/plain", String(reader_a));
+  }).addMiddleware(&basicAuth);
+
+  server.on("/diagnostics/cardreader/fuse", HTTP_GET, [](AsyncWebServerRequest *request) {
+    float fuse_v = (adc.read(ADC_READER_FUSE_FB) * adc_to_v * vdiv_scale_f);
+    request->send(200, "text/plain", (fuse_v > 11.0) ? "true" : "false");
+  }).addMiddleware(&basicAuth);
+
+  server.on("/access", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/access_log", "text/plain");
+  }).addMiddleware(&basicAuth);
 
   // Start the web server
   server.begin();
@@ -612,32 +654,30 @@ void setup() {
 long prune_counter = 0;
 void loop() {
   prune_counter++;
-  if (prune_counter>(10*60*60*12)){
+  if (prune_counter > (10 * 60 * 60 * 12)) {
     prune_access_log();
-    prune_counter=0;
+    prune_counter = 0;
   }
-    
+
 
   if (eth_connected) {
-    server.handleClient();
   }
   if (haveCard()) {
     Serial.println("I have a card!");
     unsigned long card = getIDOfCurrentCard();
     if (card_in_database(card)) {
-      add_card_to_log(card,true);
+      add_card_to_log(card, true);
       Serial.println("Entry Granted!");
       set_strike(0, false);
       set_strike(1, false);
       delay(5000);
       set_strike(0, true);
       set_strike(1, true);
-      
+
     } else {
-      add_card_to_log(card,false);
+      add_card_to_log(card, false);
       Serial.println("INVALID Card!");
     }
     Serial.println(card);
   }
-  delay(100);
 }
