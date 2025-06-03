@@ -5,6 +5,7 @@
 #include <ADS7828.h>
 #include "secret.h"
 #include "card_database.h"
+#include "adc_channels.h"
 
 // External declarations
 extern SemaphoreHandle_t access_log_mutex;
@@ -13,15 +14,6 @@ extern float adc_to_v;
 extern float vdiv_scale_f;
 extern ADS7828 adc;
 
-// ADC channel definitions
-#define ADC_READER_FUSE_FB 0
-#define ADC_STRIKE_FB0 1
-#define ADC_STRIKE_FB1 2
-#define ADC_STRIKE_0_CURRENT 3
-#define ADC_DC_CONNECTOR_FB 4
-#define ADC_12V_FB 5
-#define ADC_STRIKE_1_CURRENT 6
-#define ADC_READER_CURRENT 7
 
 // Remove static instance since we have a global one
 // static CardReaderWebServer webServerInstance;
