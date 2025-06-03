@@ -5,7 +5,6 @@
 #include <ADS7828.h>
 #include "secret.h"
 #include "card_database.h"
-#include "adc_channels.h"
 
 // External declarations
 extern SemaphoreHandle_t access_log_mutex;
