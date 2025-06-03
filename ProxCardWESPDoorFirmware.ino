@@ -21,6 +21,7 @@
 #include "card_database.h"
 #include "access_log.h"
 #include "adc_channels.h"
+#include <ArduinoJson.h>
 #define FORMAT_LITTLEFS_IF_FAILED true
 
 // Authentication type definition
@@ -57,7 +58,7 @@ static bool eth_connected = false;
 // Hardware component arrays
 ADS7828 adc;
 CardReader readers[] = {
-    CardReader(adc, READER_W0, READER_W1, ADC_READER_FUSE_FB, ADC_READER_CURRENT)    // Reader 0
+    CardReader(adc, READER_W0, READER_W1, ADC_READER_FUSE_FB, ADC_READER_CURRENT, true)    // Reader 0 - Ignore parity errors
 };
 DoorStrike strikes[] = {
     DoorStrike(adc, 0, SOLENOID_A_PIN, ADC_STRIKE_FB0, ADC_STRIKE_0_CURRENT, 
@@ -77,6 +78,7 @@ CardReaderWebServer webServer(readers, NUM_READERS, strikes, NUM_STRIKES, cardDb
 const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -18000;
 const int daylightOffset_sec = 3600;
+
 
 // WARNING: onEvent is called from a separate FreeRTOS task (thread)!
 void onEvent(arduino_event_id_t event) {
@@ -140,7 +142,7 @@ void setup() {
     Serial.print("\tCurrent: ");
     Serial.println(strikes[i].getCurrent());
   }
-  
+
   // Mount internal Filesystem
   if (!LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED)) {
     Serial.println("LittleFS Mount Failed");
@@ -163,24 +165,27 @@ void setup() {
   } else {
     Serial.println("Access log initialized");
   }
-  
+
   Network.onEvent(onEvent);
   ETH.begin();
-  
+
   // Initialize and start the webserver
   webServer.begin();
   Serial.println("Webserver initialized");
+
 }
 
-
 void loop() {
-    if (eth_connected) {
+    // Handle web server clients
+    webServer.update();
+
+  if (eth_connected) {
         webServer.update();
     }
     
     // Check all readers for cards
     for (size_t i = 0; i < NUM_READERS; i++) {
-        readers[i].printDebug();  // Print debug info for each reader
+        //readers[i].printDebug();  // Print debug info for each reader
         
         if (readers[i].isCardPresent()) {
             Serial.print("Reader ");
@@ -191,18 +196,18 @@ void loop() {
             if (card<0) continue;
             if (cardDb.hasCard(card)) {
                 accessLog.addCardAccess(card, true);
-                Serial.println("Entry Granted!");
-                
+      Serial.println("Entry Granted!");
+
                 // Engage all strikes with automatic timeout
                 for (size_t j = 0; j < NUM_STRIKES; j++) {
                     strikes[j].engageWithTimeout(5000); // 5 second timeout
                 }
-            } else {
+    } else {
                 accessLog.addCardAccess(card, false);
-                Serial.println("INVALID Card!");
-            }
-            Serial.println(card);
-        }
+      Serial.println("INVALID Card!");
+    }
+    Serial.println(card);
+  }
     }
     
     delay(1000);  // Add a delay to prevent flooding the serial output

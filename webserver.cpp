@@ -13,6 +13,15 @@ extern float adc_to_v;
 extern float vdiv_scale_f;
 extern ADS7828 adc;
 
+// ADC channel definitions
+#define ADC_READER_FUSE_FB 0
+#define ADC_STRIKE_FB0 1
+#define ADC_STRIKE_FB1 2
+#define ADC_STRIKE_0_CURRENT 3
+#define ADC_DC_CONNECTOR_FB 4
+#define ADC_12V_FB 5
+#define ADC_STRIKE_1_CURRENT 6
+#define ADC_READER_CURRENT 7
 
 // Remove static instance since we have a global one
 // static CardReaderWebServer webServerInstance;
@@ -70,6 +79,7 @@ void CardReaderWebServer::setupRoutes() {
     server.addRewrite(new OneParamRewrite("/diagnostics/strike/{f}/actuate", "/diagnostics/strike/actuate?number={f}"));
     server.addRewrite(new OneParamRewrite("/diagnostics/cardreader/{f}/current", "/diagnostics/cardreader/current?number={f}"));
     server.addRewrite(new OneParamRewrite("/diagnostics/cardreader/{f}/fuse", "/diagnostics/cardreader/fuse?number={f}"));
+    server.addRewrite(new OneParamRewrite("/diagnostics/cardreader/{f}/wiegand/burst", "/diagnostics/cardreader/wiegand/burst?number={f}"));
 
     // Backward compatibility rewrites for old reader endpoints
     server.addRewrite(new AsyncWebRewrite("/diagnostics/cardreader/current", "/diagnostics/cardreader/current?number=0"));
@@ -145,6 +155,11 @@ void CardReaderWebServer::setupRoutes() {
     // Access log endpoint
     server.on("/access", HTTP_GET, [this](AsyncWebServerRequest *request) {
         handleAccessLogGet(request);
+    }).addMiddleware(&basicAuth);
+
+    // Add Wiegand burst endpoint
+    server.on("/diagnostics/cardreader/wiegand/burst", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        handleCardReaderBurst(request);
     }).addMiddleware(&basicAuth);
 }
 
@@ -334,4 +349,34 @@ void CardReaderWebServer::handleCardReaderList(AsyncWebServerRequest *request) {
 void CardReaderWebServer::handleAccessLogGet(AsyncWebServerRequest *request) {
     String logContents = accessLog.getLogContents();
     request->send(200, "text/plain", logContents);
+}
+
+void CardReaderWebServer::handleCardReaderBurst(AsyncWebServerRequest *request) {
+    if (!request->hasParam("number")) {
+        request->send(400, "text/plain", "Missing reader number parameter");
+        return;
+    }
+    String readerStr = request->getParam("number")->value();
+    unsigned int reader = readerStr.toInt();
+    if (reader >= numReaders) {
+        request->send(400, "text/plain", "Invalid reader number");
+        return;
+    }
+    
+    // Get the burst data
+    CardReader::WiegandBurst burst = CardReader::getLastBurst(readers[reader]);
+    //readers[reader].printDebug();
+    
+    // Create JSON response
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    StaticJsonDocument<4096> doc;  // Adjust size based on your needs
+    JsonObject root = doc.to<JsonObject>();
+    
+    // Add burst data
+    burst.toJson(root);
+    
+    // Send the response
+    serializeJson(doc, *response);
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
 } 

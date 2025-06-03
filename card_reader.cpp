@@ -8,11 +8,12 @@ std::map<uint8_t, CardReader*> CardReader::pinToReader;
 SemaphoreHandle_t CardReader::mutex = NULL;
 
 CardReader::CardReader(ADS7828& adc, uint8_t data0Pin, uint8_t data1Pin,
-                      uint8_t fuseFeedbackChannel, uint8_t currentChannel)
+                      uint8_t fuseFeedbackChannel, uint8_t currentChannel,
+                      bool ignoreParityErrors)
     : adc(adc), data0Pin(data0Pin), data1Pin(data1Pin),
       fuseFeedbackChannel(fuseFeedbackChannel), currentChannel(currentChannel),
       bitw(0), timeout(0), bitcnt(0), firstBitTime(0), waitingForRise(false),
-      currentBitPin(0) {
+      currentBitPin(0), ignoreParityErrors(ignoreParityErrors) {
     
     // Create mutex if it doesn't exist
     if (mutex == NULL) {
@@ -45,9 +46,6 @@ CardReader::~CardReader() {
 }
 
 void CardReader::resetTiming() {
-    firstBitTime = 0;
-    waitingForRise = false;
-    currentBitPin = 0;
     for (int i = 0; i < MAX_BITS; i++) {
         bitTimings[i].fallTime = 0;
         bitTimings[i].riseTime = 0;
@@ -113,50 +111,40 @@ void IRAM_ATTR CardReader::handleEdge(uint8_t pin, bool isFalling) {
     unsigned long currentTime = micros();
     
     if (isFalling) {
-        // If this is the first bit of a new card, reset timing state
+        // This is a falling edge
         if (bitcnt == 0) {
+            // First bit of a new card - reset timing state
             firstBitTime = currentTime;
-            waitingForRise = true;
-            currentBitPin = pin;
-            // Clear timing array for new data
-            for (int i = 0; i < MAX_BITS; i++) {
-                bitTimings[i].fallTime = 0;
-                bitTimings[i].riseTime = 0;
-                bitTimings[i].valid = false;
-            }
+            waitingForRise = false;
+            currentBitPin = 0;
+            resetTiming();
+            bitTimings[0].fallTime = 0;  // Relative to itself
+        } else {
+            // Record falling edge time relative to first bit
+            bitTimings[bitcnt].fallTime = currentTime - firstBitTime;
         }
         
-        // Record falling edge time relative to first bit
-        if (bitcnt < MAX_BITS) {
-            bitTimings[bitcnt].fallTime = currentTime - firstBitTime;
-            bitTimings[bitcnt].valid = false;  // Not valid until we get rising edge
-            currentBitPin = pin;  // Remember which pin triggered this bit
+        // Set the bit value based on which pin triggered
+        if (pin == data0Pin) {
+            bitw = (bitw << 1) | 0x0;
+        } else {
+            bitw = (bitw << 1) | 0x1;
         }
+        
+        currentBitPin = pin;
+        waitingForRise = true;
+        timeout = millis();
     } else if (waitingForRise && pin == currentBitPin) {
-        // Only process rising edge if it's from the same pin as the falling edge
-        if (bitcnt < MAX_BITS) {
-            bitTimings[bitcnt].riseTime = currentTime - firstBitTime;
-            bitTimings[bitcnt].valid = true;
-            waitingForRise = false;
-        }
+        // This is a rising edge for the current bit
+        bitTimings[bitcnt].riseTime = currentTime - firstBitTime;
+        bitTimings[bitcnt].valid = true;
+        bitcnt++;
+        waitingForRise = false;
     }
 }
 
-void CardReader::updateBurstInfo(bool hasTimingError, bool hasWidthError, 
-                               bool hasSpacingError, bool hasParityError) {
-    lastBurstInfo.data = bitw;
-    lastBurstInfo.bitCount = bitcnt;
-    lastBurstInfo.hasTimingError = hasTimingError;
-    lastBurstInfo.hasWidthError = hasWidthError;
-    lastBurstInfo.hasSpacingError = hasSpacingError;
-    lastBurstInfo.hasParityError = hasParityError;
-    lastBurstInfo.firstBitTime = firstBitTime;
-    lastBurstInfo.lastBitTime = bitcnt > 0 ? bitTimings[bitcnt-1].riseTime + firstBitTime : 0;
-    
-    // Copy timing data
-    for (int i = 0; i < bitcnt && i < MAX_BITS; i++) {
-        lastBurstInfo.timings[i] = bitTimings[i];
-    }
+bool CardReader::isCardPresent() const {
+    return (((millis() - timeout) > 500) && bitcnt > 30);
 }
 
 long CardReader::getCardId() {
@@ -164,73 +152,80 @@ long CardReader::getCardId() {
         return -1;
     }
     
-    // Reset state variables
-    bitcnt = 0;
-    bitw = 0;
-    timeout = 0;
+    // Store current state for validation
+    int bitcnttmp = bitcnt;
+    unsigned long long bitwtmp = bitw;
+    BitTiming bitTimingsCopy[MAX_BITS];
+    memcpy(bitTimingsCopy, bitTimings, sizeof(bitTimings));
     
-    // Wait for card read with timeout
-    unsigned long startTime = millis();
-    while (!timeout && (millis() - startTime < 1000)) {
-        delay(1);
-    }
+    // Extract card info
+    unsigned int site = (bitwtmp >> 25) & 0x00007f;
+    unsigned long int card = (bitwtmp >> 1) & 0xffffff;
+    bool op = (bitwtmp >> 0) & 0x000001;
+    bool ep = (bitwtmp >> 32) & 0x000001;
     
-    // If we got a timeout or no bits, return error
-    if (!timeout || bitcnt == 0) {
-        giveMutex();
-        return -1;
-    }
+    // Calculate expected parity
+    int calc_ep = calculateParity(site);
+    int calc_op = calculateParity(card);
     
-    // Check timing and parity
+    // Validate parity and timing
     bool timingIssue = false;
     bool widthIssue = false;
     bool spacingIssue = false;
+    bool parityIssue = !ignoreParityErrors && (calc_ep != ep || calc_op != op);
     
-    // Check timing of each bit
-    for (int i = 0; i < bitcnt; i++) {
-        if (!bitTimings[i].valid) {
-            timingIssue = true;
-            continue;
-        }
-        
-        // Calculate bit width
-        unsigned long width = bitTimings[i].riseTime - bitTimings[i].fallTime;
-        if (width < MIN_BIT_WIDTH || width > MAX_BIT_WIDTH) {
-            widthIssue = true;
-        }
-        
-        // Check inter-bit spacing (except for first bit)
-        if (i > 0) {
-            unsigned long spacing = bitTimings[i].fallTime - bitTimings[i-1].riseTime;
-            if (spacing < MIN_BIT_SPACING || spacing > MAX_BIT_SPACING) {
+    for (int i = 0; i < bitcnttmp && i < MAX_BITS; i++) {
+        if (bitTimingsCopy[i].valid) {
+            unsigned long bitWidth = bitTimingsCopy[i].riseTime - bitTimingsCopy[i].fallTime;
+            unsigned long spacing = 0;
+            if (i > 0 && bitTimingsCopy[i-1].valid) {
+                spacing = bitTimingsCopy[i].fallTime - bitTimingsCopy[i-1].riseTime;
+            }
+            
+            // Check bit width
+            if (bitWidth < MIN_BIT_WIDTH || bitWidth > MAX_BIT_WIDTH) {
+                widthIssue = true;
+            }
+            
+            // Check inter-bit spacing (skip for first bit)
+            if (i > 0 && (spacing < MIN_BIT_SPACING || spacing > MAX_BIT_SPACING)) {
                 spacingIssue = true;
             }
         }
     }
     
-    // Extract card information
-    unsigned long siteCode = (bitw >> 1) & 0x1FFF;  // 13 bits for site code
-    unsigned long cardNumber = (bitw >> 14) & 0x3FFF;  // 14 bits for card number
+    timingIssue = widthIssue || spacingIssue;
     
-    // Calculate expected parity
-    int expectedParity = calculateParity(siteCode) ^ calculateParity(cardNumber);
-    int receivedParity = (bitw >> 28) & 0x3;  // Last 2 bits are parity
+    // Create and store the burst data
+    lastBurst.data = bitwtmp;
+    lastBurst.bitCount = bitcnttmp;
+    memcpy(lastBurst.timings, bitTimingsCopy, sizeof(lastBurst.timings));
     
-    bool parityError = (receivedParity != expectedParity);
-    
-    // Update burst info with all error flags
-    updateBurstInfo(timingIssue || widthIssue || spacingIssue, 
-                   widthIssue, spacingIssue, parityError);
-    
-    // If we have any issues, print debug info and return error
-    if (timingIssue || widthIssue || spacingIssue || parityError) {
-        printDebug();
-        giveMutex();
-        return -1;
+    // Validate the burst
+    if (lastBurst.bitCount >= 26) {  // Minimum bits for a valid Wiegand 26
+        // Check parity (respecting ignoreParityErrors setting)
+        lastBurst.valid = (!parityIssue && !timingIssue);
+    } else {
+        lastBurst.valid = false;
     }
     
+    // If there are any issues, print debug info and return error
+    if (parityIssue || timingIssue) {
+        // Temporarily restore the state for debug printing
+        bitw = bitwtmp;
+        bitcnt = bitcnttmp;
+        memcpy(bitTimings, bitTimingsCopy, sizeof(bitTimings));
+        printDebug();
+        card = -1; 
+    }
+    
+    // Always reset state, even if we're going to return an error
+    bitcnt = 0;
+    bitw = 0;
+    timeout = 0;  // Clear the timeout flag
+    
     giveMutex();
-    return cardNumber;
+    return card;
 }
 
 float CardReader::getCurrent() const {
@@ -264,53 +259,186 @@ void CardReader::giveMutex() {
 }
 
 void CardReader::printDebug() const {
-    Serial.printf("Card Reader Debug (Pins: D0=%d, D1=%d):\n", data0Pin, data1Pin);
-    Serial.printf("Connection Status: D0=%s, D1=%s\n", 
-                 isData0Connected() ? "Connected" : "Disconnected",
-                 isData1Connected() ? "Connected" : "Disconnected");
+    Serial.println("\nCard Reader Debug Info:");
+    Serial.println("----------------------");
     
-    if (lastBurstInfo.bitCount > 0) {
-        Serial.printf("Last Burst Info:\n");
-        Serial.printf("  Bits: %d\n", lastBurstInfo.bitCount);
-        Serial.printf("  Data: 0x%llX\n", lastBurstInfo.data);
-        Serial.printf("  First Bit Time: %lu us\n", lastBurstInfo.firstBitTime);
-        Serial.printf("  Last Bit Time: %lu us\n", lastBurstInfo.lastBitTime);
-        Serial.printf("  Errors: Timing=%d, Width=%d, Spacing=%d, Parity=%d\n",
-                     lastBurstInfo.hasTimingError,
-                     lastBurstInfo.hasWidthError,
-                     lastBurstInfo.hasSpacingError,
-                     lastBurstInfo.hasParityError);
-        
-        Serial.println("Bit Timing Analysis:");
-        for (int i = 0; i < lastBurstInfo.bitCount; i++) {
-            const BitTiming& timing = lastBurstInfo.timings[i];
-            if (!timing.valid) {
-                Serial.printf("  Bit %2d: Invalid (no rising edge)\n", i);
-                continue;
-            }
-            
-            unsigned long width = timing.riseTime - timing.fallTime;
-            unsigned long spacing = (i > 0) ? 
-                timing.fallTime - lastBurstInfo.timings[i-1].riseTime : 0;
-            
-            Serial.printf("  Bit %2d: Fall=%6lu, Rise=%6lu, Width=%4lu, Spacing=%4lu, Value=%d\n",
-                         i, timing.fallTime, timing.riseTime, width, spacing,
-                         (lastBurstInfo.data >> i) & 1);
-        }
+    // Print Wiegand protocol state
+    Serial.print("Wiegand State: bitw=0x");
+    Serial.print(bitw, HEX);
+    Serial.print(", bitcnt=");
+    Serial.print(bitcnt);
+    Serial.print(", timeout=");
+    Serial.println(timeout);
+    
+    // Print timing state
+    Serial.print("Timing State: waitingForRise=");
+    Serial.print(waitingForRise ? "YES" : "NO");
+    if (waitingForRise) {
+        Serial.print(", currentBitPin=");
+        Serial.println(currentBitPin);
     } else {
-        Serial.println("No card read in progress");
+        Serial.println();
     }
     
-    // Print current state
-    Serial.printf("Current State: bitcnt=%d, timeout=%d\n", bitcnt, timeout);
-    Serial.printf("Current: %.2f mA, Fuse: %s\n", 
-                 getCurrent(), isFuseGood() ? "Good" : "Open");
+    // Print card presence
+    Serial.print("Card Present: ");
+    Serial.println(isCardPresent() ? "YES" : "NO");
+    
+    // If we have bits, show detailed timing analysis
+    if (bitcnt > 0) {
+        Serial.println("\nBit Timing Analysis:");
+        for (int i = 0; i < bitcnt && i < MAX_BITS; i++) {
+            if (bitTimings[i].valid) {
+                unsigned long bitWidth = bitTimings[i].riseTime - bitTimings[i].fallTime;
+                unsigned long spacing = 0;
+                if (i > 0 && bitTimings[i-1].valid) {
+                    spacing = bitTimings[i].fallTime - bitTimings[i-1].riseTime;
+                }
+                
+                Serial.print("Bit ");
+                Serial.print(i);
+                Serial.print(": Start=");
+                Serial.print(bitTimings[i].fallTime);
+                Serial.print("us,\t Rise=");
+                Serial.print(bitTimings[i].riseTime);
+                Serial.print("us,\t Width=");
+                Serial.print(bitWidth);
+                if (i > 0) {
+                    Serial.print("us,\t Spacing=");
+                    Serial.print(spacing);
+                    Serial.print("us");
+                }
+                Serial.print("us,\t Value=");
+                Serial.println((unsigned int)(bitw >> (bitcnt - 1 - i) & 0x00000001));
+                
+                // Check and report timing issues
+                if (bitWidth < MIN_BIT_WIDTH || bitWidth > MAX_BIT_WIDTH) {
+                    Serial.print("  WARNING: Bit width ");
+                    Serial.print(bitWidth);
+                    Serial.print("us outside expected range ");
+                    Serial.print(MIN_BIT_WIDTH);
+                    Serial.print("-");
+                    Serial.print(MAX_BIT_WIDTH);
+                    Serial.println("us");
+                }
+                
+                if (i > 0 && (spacing < MIN_BIT_SPACING || spacing > MAX_BIT_SPACING)) {
+                    Serial.print("  WARNING: Bit spacing ");
+                    Serial.print(spacing);
+                    Serial.print("us outside expected range ");
+                    Serial.print(MIN_BIT_SPACING);
+                    Serial.print("-");
+                    Serial.print(MAX_BIT_SPACING);
+                    Serial.println("us");
+                }
+            }
+        }
+        
+        // If we have enough bits, show parity calculation
+        if (bitcnt >= 26) {
+            unsigned int site = (bitw >> 25) & 0x00007f;
+            unsigned long int card = (bitw >> 1) & 0xffffff;
+            bool op = (bitw >> 0) & 0x000001;
+            bool ep = (bitw >> 32) & 0x000001;
+            
+            Serial.println("\nParity Calculation:");
+            Serial.print("Site Code: ");
+            Serial.print(site);
+            Serial.print(" (0x");
+            Serial.print(site, HEX);
+            Serial.print(") (");
+            // Print site code bits
+            for(int i = 6; i >= 0; i--) {
+                Serial.print((site >> i) & 1);
+            }
+            Serial.println(")");
+            
+            Serial.print("Card Number: ");
+            Serial.print(card);
+            Serial.print(" (0x");
+            Serial.print(card, HEX);
+            Serial.print(") (");
+            // Print card number bits
+            for(int i = 23; i >= 0; i--) {
+                Serial.print((card >> i) & 1);
+            }
+            Serial.println(")");
+            
+            // Calculate and show parity
+            int calc_ep = calculateParity(site);
+            int calc_op = calculateParity(card);
+            
+            Serial.print("Even Parity (EP): Calculated=");
+            Serial.print(calc_ep);
+            Serial.print(", Received=");
+            Serial.println(ep);
+            
+            Serial.print("Odd Parity (OP): Calculated=");
+            Serial.print(calc_op);
+            Serial.print(", Received=");
+            Serial.println(op);
+            
+            // Show if parity is valid
+            if (calc_ep != ep || calc_op != op) {
+                Serial.println("ERROR: Parity check failed!");
+            } else {
+                Serial.println("Parity check passed");
+            }
+        }
+    }
+    
+    Serial.println("----------------------\n");
 }
 
-bool CardReader::isCardPresent() const {
-    // A card is considered present if:
-    // 1. We have received more than 30 bits (typical Wiegand format)
-    // 2. The timeout has occurred (indicating end of transmission)
-    // 3. Less than 500ms has passed since the timeout
-    return (bitcnt > 30) && timeout && ((millis() - timeout) < 500);
+CardReader::WiegandBurst CardReader::getLastBurst(const CardReader& reader) {
+    return reader.lastBurst;  // Return the stored burst
+}
+
+void CardReader::WiegandBurst::toJson(JsonObject& obj) const {
+    obj["valid"] = valid;
+    obj["bitCount"] = bitCount;
+    obj["data"] = String(data, HEX);  // Convert to hex string
+    
+    // Extract and add card info
+    unsigned int site = (data >> 25) & 0x00007f;
+    unsigned long int card = (data >> 1) & 0xffffff;
+    bool op = (data >> 0) & 0x000001;
+    bool ep = (data >> 32) & 0x000001;
+    
+    JsonObject cardInfo = obj.createNestedObject("cardInfo");
+    cardInfo["siteCode"] = site;
+    cardInfo["cardNumber"] = card;
+    cardInfo["oddParity"] = op;
+    cardInfo["evenParity"] = ep;
+    
+    // Add timing data
+    JsonArray timingArray = obj.createNestedArray("timings");
+    for (int i = 0; i < bitCount && i < MAX_BITS; i++) {
+        if (timings[i].valid) {
+            JsonObject bitTiming = timingArray.createNestedObject();
+            bitTiming["bitIndex"] = i;
+            bitTiming["fallTime"] = timings[i].fallTime;
+            bitTiming["riseTime"] = timings[i].riseTime;
+            bitTiming["width"] = timings[i].riseTime - timings[i].fallTime;
+            
+            // Calculate spacing (except for first bit)
+            if (i > 0 && timings[i-1].valid) {
+                bitTiming["spacing"] = timings[i].fallTime - timings[i-1].riseTime;
+            }
+            
+            // Add bit value
+            bitTiming["value"] = (unsigned int)(data >> (bitCount - 1 - i) & 0x00000001);
+            
+            // Add timing validation
+            unsigned long bitWidth = timings[i].riseTime - timings[i].fallTime;
+            bool widthValid = (bitWidth >= MIN_BIT_WIDTH && bitWidth <= MAX_BIT_WIDTH);
+            bitTiming["widthValid"] = widthValid;
+            
+            if (i > 0 && timings[i-1].valid) {
+                unsigned long spacing = timings[i].fallTime - timings[i-1].riseTime;
+                bool spacingValid = (spacing >= MIN_BIT_SPACING && spacing <= MAX_BIT_SPACING);
+                bitTiming["spacingValid"] = spacingValid;
+            }
+        }
+    }
 } 

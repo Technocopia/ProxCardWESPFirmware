@@ -61,6 +61,7 @@ private:
     void handleCardReaderCurrent(AsyncWebServerRequest *request);
     void handleCardReaderFuse(AsyncWebServerRequest *request);
     void handleCardReaderList(AsyncWebServerRequest *request);
+    void handleCardReaderBurst(AsyncWebServerRequest *request);
     
     // Access log endpoints
     void handleAccessLogGet(AsyncWebServerRequest *request);

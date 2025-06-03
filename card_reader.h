@@ -4,25 +4,13 @@
 #include <ADS7828.h>
 #include <map>
 #include <driver/gpio.h>  // For ESP32 GPIO register access
+#include <ArduinoJson.h>  // For JSON serialization
 
 // Structure to hold timing information for each bit
 struct BitTiming {
     unsigned long fallTime;  // Time of falling edge relative to first bit
     unsigned long riseTime;  // Time of rising edge relative to first bit
     bool valid;             // Whether we captured both edges
-};
-
-// Structure to hold Wiegand burst information
-struct WiegandBurstInfo {
-    unsigned long long data;     // The actual data bits
-    int bitCount;               // Number of bits received
-    BitTiming timings[100];     // Timing information for each bit
-    bool hasTimingError;        // Whether any timing errors were detected
-    bool hasWidthError;         // Whether any bit width errors were detected
-    bool hasSpacingError;       // Whether any inter-bit spacing errors were detected
-    bool hasParityError;        // Whether parity check failed
-    unsigned long firstBitTime; // Time of first falling edge
-    unsigned long lastBitTime;  // Time of last rising edge
 };
 
 class CardReader {
@@ -40,8 +28,24 @@ public:
     static constexpr unsigned long MAX_BIT_SPACING = 5000;  // Maximum time between bits
     static constexpr unsigned long TYPICAL_BIT_SPACING = 200;  // Typical time between bits
     
+    // Structure to hold a complete Wiegand burst
+    struct WiegandBurst {
+        BitTiming timings[MAX_BITS];  // Timing information for each bit
+        unsigned long long data;       // The actual Wiegand data
+        int bitCount;                 // Number of bits in the burst
+        bool valid;                   // Whether the burst is valid (parity and timing)
+
+        // Convert burst to JSON object
+        void toJson(JsonObject& obj) const;
+    };
+    
+    // Static function to get the last Wiegand burst
+    static WiegandBurst getLastBurst(const CardReader& reader);
+    
+    // Constructor with optional ignoreParityErrors parameter
     CardReader(ADS7828& adc, uint8_t data0Pin, uint8_t data1Pin, 
-               uint8_t fuseFeedbackChannel, uint8_t currentChannel);
+               uint8_t fuseFeedbackChannel, uint8_t currentChannel,
+               bool ignoreParityErrors = false);
     ~CardReader();
     
     void begin();
@@ -54,16 +58,12 @@ public:
     uint8_t getData0Pin() const { return data0Pin; }
     uint8_t getData1Pin() const { return data1Pin; }
     
-    // Get Wiegand signal connection status
-    bool isData0Connected() const { return gpio_get_level((gpio_num_t)data0Pin) == 1; }
-    bool isData1Connected() const { return gpio_get_level((gpio_num_t)data1Pin) == 1; }
-    bool isConnected() const { return isData0Connected() && isData1Connected(); }
-    
-    // Get information about the last Wiegand burst
-    const WiegandBurstInfo& getLastBurstInfo() const { return lastBurstInfo; }
-    
     // Debug function to print internal state
     void printDebug() const;
+    
+    // Methods to control parity error handling
+    void setIgnoreParityErrors(bool ignore) { ignoreParityErrors = ignore; }
+    bool getIgnoreParityErrors() const { return ignoreParityErrors; }
     
 private:
     // Wiegand protocol variables - now instance members
@@ -76,9 +76,6 @@ private:
     BitTiming bitTimings[MAX_BITS]; // Array to store timing of each bit's edges
     bool waitingForRise;           // Whether we're waiting for a rising edge
     uint8_t currentBitPin;         // Which pin we're currently tracking
-    
-    // Last burst information
-    WiegandBurstInfo lastBurstInfo;
     
     // Pin definitions
     const uint8_t data0Pin;
@@ -99,13 +96,13 @@ private:
     static void IRAM_ATTR onData1ISR(void* arg);
     
     // Non-static handlers that do the actual work
-    void IRAM_ATTR handleEdge(uint8_t pin, bool isFalling);
+    void IRAM_ATTR onData0();
+    void IRAM_ATTR onData1();
     
     // Helper functions
     static int calculateParity(unsigned long int x);
-    void updateBurstInfo(bool hasTimingError, bool hasWidthError, 
-                        bool hasSpacingError, bool hasParityError);
-    void resetTiming();  // Add declaration for resetTiming
+    void IRAM_ATTR handleEdge(uint8_t pin, bool isFalling);
+    void resetTiming();
     
     // Mutex for thread safety
     static SemaphoreHandle_t mutex;
@@ -113,4 +110,10 @@ private:
     // Mutex helper functions
     bool takeMutex();
     void giveMutex();
+    
+    // Store the last complete burst
+    WiegandBurst lastBurst;
+    
+    // Parity error handling
+    bool ignoreParityErrors;  // Whether to ignore parity errors
 }; 
