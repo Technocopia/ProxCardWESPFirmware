@@ -46,7 +46,7 @@ bool DoorStrike::isEngaged() const {
 float DoorStrike::getCurrent() const {
     float currentVoltage = adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F;
     float voltageDifference = currentVoltage - idleVoltage;
-    return voltageDifference * 0.1 * 10; //
+    return voltageDifference * 0.1 * 1000; //
 }
 
 bool DoorStrike::isFeedbackActive() const {
