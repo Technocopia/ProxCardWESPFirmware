@@ -13,7 +13,8 @@ CardReader::CardReader(ADS7828& adc, uint8_t data0Pin, uint8_t data1Pin,
     : adc(adc), data0Pin(data0Pin), data1Pin(data1Pin),
       fuseFeedbackChannel(fuseFeedbackChannel), currentChannel(currentChannel),
       bitw(0), timeout(0), bitcnt(0), firstBitTime(0), waitingForRise(false),
-      currentBitPin(0), ignoreParityErrors(ignoreParityErrors) {
+      currentBitPin(0), ignoreParityErrors(ignoreParityErrors),
+      currentBufferIndex(0), currentBufferCount(0) {
     
     // Create mutex if it doesn't exist
     if (mutex == NULL) {
@@ -25,6 +26,11 @@ CardReader::CardReader(ADS7828& adc, uint8_t data0Pin, uint8_t data1Pin,
     
     // Initialize bit timings
     resetTiming();
+    
+    // Initialize current buffer with zeros
+    for (int i = 0; i < CURRENT_BUFFER_SIZE; i++) {
+        currentReadings[i] = 0.0;
+    }
 }
 
 CardReader::~CardReader() {
@@ -229,7 +235,13 @@ long CardReader::getCardId() {
 }
 
 float CardReader::getCurrent() const {
-    return (adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F) / 0.1;
+    // Return the rolling average (buffer updated via update() method)
+    return calculateAverageCurrent();
+}
+
+void CardReader::update() {
+    // Update the current readings buffer
+    updateCurrentBuffer();
 }
 
 bool CardReader::isFuseGood() const {
@@ -441,4 +453,32 @@ void CardReader::WiegandBurst::toJson(JsonObject& obj) const {
             }
         }
     }
+}
+
+void CardReader::updateCurrentBuffer() {
+    // Take immediate reading
+    float currentReading = ((adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F) - ZERO_VOLTAGE) * 0.1 * 1000;
+    
+    // Add to circular buffer
+    currentReadings[currentBufferIndex] = currentReading;
+    
+    // Update indices
+    currentBufferIndex = (currentBufferIndex + 1) % CURRENT_BUFFER_SIZE;
+    if (currentBufferCount < CURRENT_BUFFER_SIZE) {
+        currentBufferCount++;
+    }
+}
+
+float CardReader::calculateAverageCurrent() const {
+    if (currentBufferCount == 0) {
+        // No readings yet, return immediate reading
+        return ((adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F) - ZERO_VOLTAGE) * 0.1 * 1000;
+    }
+    
+    float sum = 0.0;
+    for (int i = 0; i < currentBufferCount; i++) {
+        sum += currentReadings[i];
+    }
+    
+    return sum / currentBufferCount;
 } 

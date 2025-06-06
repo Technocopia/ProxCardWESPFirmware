@@ -185,6 +185,9 @@ void loop() {
     
     // Check all readers for cards
     for (size_t i = 0; i < NUM_READERS; i++) {
+        // Update current readings buffer
+        readers[i].update();
+        
         //readers[i].printDebug();  // Print debug info for each reader
         
         if (readers[i].isCardPresent()) {

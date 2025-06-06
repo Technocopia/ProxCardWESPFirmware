@@ -28,6 +28,8 @@ public:
     static constexpr unsigned long MAX_BIT_SPACING = 5000;  // Maximum time between bits
     static constexpr unsigned long TYPICAL_BIT_SPACING = 200;  // Typical time between bits
     
+    static constexpr float ZERO_VOLTAGE = 9.5;
+
     // Structure to hold a complete Wiegand burst
     struct WiegandBurst {
         BitTiming timings[MAX_BITS];  // Timing information for each bit
@@ -53,6 +55,9 @@ public:
     long getCardId();
     float getCurrent() const;
     bool isFuseGood() const;
+    
+    // Update function to be called from main loop
+    void update();
     
     // Get the reader's pin numbers
     uint8_t getData0Pin() const { return data0Pin; }
@@ -116,4 +121,14 @@ private:
     
     // Parity error handling
     bool ignoreParityErrors;  // Whether to ignore parity errors
+    
+    // Rolling average for current measurement
+    static constexpr int CURRENT_BUFFER_SIZE = 60;  // Store 60 readings (1 per second for 1 minute)
+    float currentReadings[CURRENT_BUFFER_SIZE];
+    int currentBufferIndex;
+    int currentBufferCount;
+    
+    // Helper methods for rolling average
+    void updateCurrentBuffer();
+    float calculateAverageCurrent() const;
 }; 
