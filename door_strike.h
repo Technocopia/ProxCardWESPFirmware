@@ -40,6 +40,7 @@ private:
     const Polarity polarity;
     bool currentState;
     bool actuatingState;  // New flag to track actuation state
+    float idleVoltage;    // Baseline voltage when solenoid is open
     TimerHandle_t disengageTimer;
     
     static void disengageTimerCallback(TimerHandle_t timer);

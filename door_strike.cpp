@@ -6,11 +6,13 @@ DoorStrike::DoorStrike(ADS7828& adc, uint8_t strikeIndex, uint8_t solenoidPin,
                        Polarity polarity)
     : adc(adc), strikeIndex(strikeIndex), solenoidPin(solenoidPin),
       feedbackChannel(feedbackChannel), currentChannel(currentChannel),
-      polarity(polarity), currentState(false), actuatingState(false), disengageTimer(NULL) {
+      polarity(polarity), currentState(false), actuatingState(false), 
+      idleVoltage(0.0), disengageTimer(NULL) {
     // Initialize GPIO immediately in constructor
     pinMode(solenoidPin, OUTPUT);
     // Set to inactive state based on polarity
     digitalWrite(solenoidPin, getPhysicalState(false));
+
 }
 
 DoorStrike::~DoorStrike() {
@@ -23,6 +25,8 @@ bool DoorStrike::begin() {
     pinMode(solenoidPin, OUTPUT);
     digitalWrite(solenoidPin, getPhysicalState(false));
     currentState = false;
+    // Capture idle voltage when solenoid is off
+    idleVoltage = adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F;
     return true;
 }
 
@@ -40,7 +44,9 @@ bool DoorStrike::isEngaged() const {
 }
 
 float DoorStrike::getCurrent() const {
-    return (adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F *  0.1); // Assuming 0.1 ohm sense resistor
+    float currentVoltage = adc.read(currentChannel) * ADC_TO_V * VDIV_SCALE_F;
+    float voltageDifference = currentVoltage - idleVoltage;
+    return voltageDifference * 0.1 * 10; //
 }
 
 bool DoorStrike::isFeedbackActive() const {
