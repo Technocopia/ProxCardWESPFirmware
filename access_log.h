@@ -22,6 +22,9 @@ public:
     // Get the current log contents
     String getLogContents();
 
+    // Prune the log to a maximum number of lines
+    bool pruneLog(int maxLines = 1000);
+
 private:
     // File path
     static constexpr const char* LOG_PATH = "/access_log";

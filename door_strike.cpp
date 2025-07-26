@@ -92,7 +92,7 @@ void DoorStrike::engageWithTimeout(uint32_t timeoutMs) {
 
 bool DoorStrike::isConnected() const {
     // Consider both voltage and actuation state
-    return (getVoltage() > 11.0) || actuatingState;
+    return (getVoltage() > 10.0) || actuatingState;
 }
 
 bool DoorStrike::isActuating() const {
