@@ -176,41 +176,63 @@ void setup() {
 }
 
 void loop() {
-    // Handle web server clients
-    webServer.update();
-
-  if (eth_connected) {
-        webServer.update();
-    }
+    static int loopCounter = 0;
     
+    // Prune access log every 100 iterations (approximately every 100 seconds)
+    if (++loopCounter >= 100) {
+        accessLog.pruneLog(1000);
+        loopCounter = 0;
+    }
+
     // Check all readers for cards
     for (size_t i = 0; i < NUM_READERS; i++) {
         // Update current readings buffer
         readers[i].update();
         
-        //readers[i].printDebug();  // Print debug info for each reader
+        
         
         if (readers[i].isCardPresent()) {
             Serial.print("Reader ");
             Serial.print(i);
             Serial.println(" has a card!");
+            readers[i].printDebug();  // Print debug info for each reader
             
+            // Decode the card data first
+            readers[i].decodeCard();
+            // Get the decoded card information
             long card = readers[i].getCardId();
-            if (card<0) continue;
-            if (cardDb.hasCard(card)) {
-                accessLog.addCardAccess(card, true);
-      Serial.println("Entry Granted!");
+            unsigned int siteCode = readers[i].getSiteCode();
+            Serial.println("Card ID: ");
+            Serial.println(card);
+            Serial.println("Site Code: ");
+            Serial.println(siteCode);
+            
 
+            
+            // Grant access if card is in database OR site code is 0x10
+            //if (cardDb.hasCard(card) || siteCode == 0x10) {
+            if (siteCode == 198){
+              if (cardDb.hasCard(card) ){
+                accessLog.addCardAccess(card, true);
+                Serial.println("Entry Granted!");
                 // Engage all strikes with automatic timeout
                 for (size_t j = 0; j < NUM_STRIKES; j++) {
-                    strikes[j].engageWithTimeout(5000); // 5 second timeout
-                }
-    } else {
+                  strikes[j].engageWithTimeout(5000); // 5 second timeout
+              }
+              } else {
+                Serial.println("Card not in database!");
+              }
+
+
+
+
+            } else {
                 accessLog.addCardAccess(card, false);
-      Serial.println("INVALID Card!");
-    }
-    Serial.println(card);
-  }
+                Serial.println("INVALID Card!");
+                Serial.print("Site Code: ");
+                Serial.println(siteCode);
+            }
+      }
     }
     
     delay(1000);  // Add a delay to prevent flooding the serial output

@@ -53,6 +53,8 @@ public:
     void begin();
     bool isCardPresent() const;
     long getCardId();
+    unsigned int getSiteCode();
+    void decodeCard();
     float getCurrent() const;
     bool isFuseGood() const;
     
@@ -75,6 +77,10 @@ private:
     unsigned long long bitw;
     unsigned int timeout;
     int bitcnt;
+    
+    // Decoded card information
+    unsigned long int decodedCardId;
+    unsigned int decodedSiteCode;
     
     // Timing tracking
     unsigned long firstBitTime;     // Time of first falling edge
